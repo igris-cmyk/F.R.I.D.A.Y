@@ -46,6 +46,18 @@ class CapabilityExecutor:
                 recovery_hint="Check the capability ID and ensure it exists in the registry."
             )
             
+        # 2. Security & Permission Validation
+        evaluation = self.security_policy.evaluate_invocation(invocation, definition.risk_level, definition.mutation_allowed)
+
+        if evaluation.status == "DENY":
+            return CapabilityFailure(
+                capability_id=invocation.capability_id,
+                error_code="SECURITY_DENIAL",
+                message=evaluation.reason,
+                trace_id=invocation.context.trace_id,
+                recovery_hint="Action requires human approval or is explicitly blocked."
+            )
+
         if not definition.enabled:
             return CapabilityFailure(
                 capability_id=invocation.capability_id,
@@ -54,7 +66,7 @@ class CapabilityExecutor:
                 trace_id=invocation.context.trace_id
             )
 
-        # 2. Schema Validation (Basic check for MVP)
+        # 3. Schema Validation (Basic check for MVP)
         required_fields = definition.input_schema.get("required", [])
         for field in required_fields:
             if field not in invocation.input_payload:
@@ -65,18 +77,7 @@ class CapabilityExecutor:
                     trace_id=invocation.context.trace_id
                 )
 
-        # 3. Security & Permission Validation
-        evaluation = self.security_policy.evaluate_invocation(invocation, definition.risk_level, definition.mutation_allowed)
-        
-        if evaluation.status == "DENY":
-            return CapabilityFailure(
-                capability_id=invocation.capability_id,
-                error_code="SECURITY_DENIAL",
-                message=evaluation.reason,
-                trace_id=invocation.context.trace_id,
-                recovery_hint="Action requires human approval or is explicitly blocked."
-            )
-            
+        # 4. Approval Validation
         if evaluation.status == "REQUIRES_APPROVAL" and not human_approved:
             return CapabilityRequiresApproval(
                 capability_id=invocation.capability_id,
@@ -85,7 +86,7 @@ class CapabilityExecutor:
                 trace_id=invocation.context.trace_id
             )
             
-        # 4. Execution with Timeout (ALLOW status)
+        # 5. Execution with Timeout (ALLOW status)
         timeout = invocation.timeout_seconds or definition.timeout_seconds
         
         try:

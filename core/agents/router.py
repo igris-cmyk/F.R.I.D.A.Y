@@ -26,6 +26,61 @@ class RouterState(TypedDict):
     error: str
     routing_metadata: Dict[str, Any]
 
+
+def is_operational_command(cmd: str) -> bool:
+    normalized = cmd.strip().lower()
+    dangerous_terms = [
+        "delete",
+        "remove",
+        "wipe",
+        "rm -rf",
+    ]
+
+    direct_prefixes = [
+        "run",
+        "execute",
+        "ls",
+        "pwd",
+        "echo",
+        "cat",
+        "git",
+        "docker",
+        "npm",
+        "cargo",
+        "pkill",
+        "read ",
+        "show ",
+    ]
+    if any(normalized.startswith(prefix) for prefix in direct_prefixes):
+        return True
+
+    if any(term in normalized for term in dangerous_terms):
+        return True
+
+    if "git status" in normalized:
+        return True
+
+    if normalized.startswith("find ") and " file" in normalized:
+        return True
+
+    if normalized in {"system monitor", "monitor system"}:
+        return True
+
+    return False
+
+
+def is_conversational_greeting(cmd: str) -> bool:
+    normalized = cmd.strip().lower()
+    greetings = [
+        "hello",
+        "hello friday",
+        "hi",
+        "hi friday",
+        "hey",
+        "hey friday",
+    ]
+    return normalized in greetings
+
 async def classify_intent(state: RouterState) -> RouterState:
     """
     Hybrid Intent Classifier.
@@ -37,15 +92,20 @@ async def classify_intent(state: RouterState) -> RouterState:
     start_time = time.time()
     
     # 1. Fast-Path Heuristic Evaluation (Sub-millisecond)
-    terminal_indicators = ["run", "execute", "ls", "pwd", "echo", "cat", "git", "docker", "npm", "cargo", "pkill"]
-    memory_indicators = ["remember", "what did i do", "search", "find", "recall"]
+    memory_indicators = ["remember", "what did i do", "search", "recall"]
     
-    if any(cmd.lower().startswith(indicator) for indicator in terminal_indicators):
+    if is_operational_command(cmd):
         state["intent"] = "terminal"
-        # Naive extraction for fast path
-        state["parameters"] = {"executable_command": cmd[4:].strip() if cmd.lower().startswith("run ") else cmd}
+        state["parameters"] = {"executable_command": cmd}
         state["routing_metadata"] = {"source": "heuristic", "confidence": 1.0, "latency_ms": int((time.time() - start_time)*1000)}
         logger.info(f"Router classified (heuristic): TERMINAL -> {state['parameters']['executable_command']}")
+        return state
+
+    if is_conversational_greeting(cmd):
+        state["intent"] = "conversation"
+        state["parameters"] = {"message": cmd}
+        state["routing_metadata"] = {"source": "heuristic", "confidence": 1.0, "latency_ms": int((time.time() - start_time)*1000)}
+        logger.info("Router classified (heuristic): CONVERSATION")
         return state
 
     if any(cmd.lower().startswith(ind) for ind in memory_indicators):

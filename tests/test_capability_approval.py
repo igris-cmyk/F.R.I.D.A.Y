@@ -67,8 +67,8 @@ class TestCapabilityApproval(unittest.IsolatedAsyncioTestCase):
         )
         res = await self.executor.execute(invocation)
         self.assertIsInstance(res, CapabilityFailure)
-        self.assertEqual(res.error_code, "CAPABILITY_DISABLED")
-        # Even if enabled, it would be denied by security policy. Let's force enable to test security policy.
+        self.assertEqual(res.error_code, "SECURITY_DENIAL")
+        # Even if enabled, it remains denied by security policy. Let's force enable to confirm precedence.
         self.registry.get("shell.execute").enabled = True
         res = await self.executor.execute(invocation)
         self.assertIsInstance(res, CapabilityFailure)
