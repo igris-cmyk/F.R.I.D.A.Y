@@ -1,0 +1,20 @@
+[project]
+name = "friday-core"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "asyncpg>=0.31.0",
+    "fastapi>=0.136.3",
+    "langchain-anthropic>=1.4.3",
+    "langchain-core>=1.4.0",
+    "langchain-ollama>=1.1.0",
+    "langgraph>=1.2.1",
+    "msgpack>=1.1.2",
+    "nats-py>=2.14.0",
+    "pgvector>=0.4.2",
+    "pydantic>=2.13.4",
+    "sqlalchemy>=2.0.50",
+    "uvicorn>=0.48.0",
+]

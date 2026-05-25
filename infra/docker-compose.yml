@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # NATS: High-performance event bus for orchestrator <-> agent <-> UI IPC
+  nats:
+    image: nats:2.10-alpine
+    command: ["-c", "/nats.conf"] # Use custom config for JetStream + WebSockets
+    ports:
+      - "4222:4222"
+      - "9222:9222" # WebSocket port
+    volumes:
+      - nats-data:/data
+      - ./nats.conf:/nats.conf
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/varz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # PostgreSQL: Core memory store (Relational + pgvector + AGE Graph)
+  postgres:
+    # Using a custom build or a comprehensive image that supports both pgvector and age.
+    # For MVP, we will use the standard postgres image and install extensions via init script,
+    # OR use an image that has pgvector and install AGE. We will use the pgvector official image
+    # and plan to compile/install AGE via Dockerfile if needed, but for now we'll start with pgvector.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: friday
+      POSTGRES_PASSWORD: friday_password
+      POSTGRES_DB: friday_memory
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U friday -d friday_memory"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis: Short-term / Working memory cache
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Ollama: Local inference engine (fallback & fast routing)
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    # If running on Linux with NVIDIA GPU, uncomment below:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  nats-data:
+  postgres-data:
+  redis-data:
+  ollama-data:

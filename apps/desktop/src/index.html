@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>F.R.I.D.A.Y</title>
+  </head>
+  <body>
+    <div class="palette-container">
+      <div class="input-wrapper">
+        <span class="prompt-icon">✧</span>
+        <input 
+          type="text" 
+          id="command-input" 
+          placeholder="How can I help you, boss?" 
+          autocomplete="off" 
+          autofocus 
+        />
+      </div>
+      <div id="response-area" class="response-area hidden">
+        <pre class="response-content" id="output-log"></pre>
+      </div>
+      <div class="status-bar">
+        <span id="nats-status" class="status-indicator offline">Disconnected</span>
+        <span class="system-status">Core: Operational</span>
+      </div>
+    </div>
+    <!-- Load NATS ES module -->
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

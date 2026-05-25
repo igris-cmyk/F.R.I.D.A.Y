@@ -1,0 +1,40 @@
+
+
+cat > .gitignore <<'EOF'
+# Dependencies
+node_modules/
+apps/desktop/node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+core/.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Rust / Tauri
+target/
+apps/desktop/src-tauri/target/
+
+# Build outputs
+dist/
+build/
+apps/desktop/dist/
+
+# Logs
+*.log
+logs/
+task-*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+EOF
