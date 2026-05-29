@@ -6,14 +6,12 @@ from typing import AsyncGenerator, Dict, Any
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from core.agents.memory_agent import memory_agent, RetrievalPolicy
+from core.config import FRIDAY_RESEARCH_MODEL, OLLAMA_BASE_URL
 
 logger = logging.getLogger("friday.agents.research")
 
-OLLAMA_MODEL = "qwen2.5:7b"
-OLLAMA_BASE_URL = "http://localhost:11434"
-
 llm = OllamaLLM(
-    model=OLLAMA_MODEL, 
+    model=FRIDAY_RESEARCH_MODEL,
     base_url=OLLAMA_BASE_URL,
     temperature=0.4 # Slightly creative for synthesis, but still bounded
 )

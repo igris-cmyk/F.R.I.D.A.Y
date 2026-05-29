@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import signal
 import json
@@ -41,7 +42,7 @@ from core.capabilities.contracts import CapabilityInvocation, CapabilityExecutio
 registry = CapabilityRegistry()
 security_policy = SecurityPolicy()
 executor = CapabilityExecutor(registry, security_policy)
-planner = CognitivePlanner()
+planner = CognitivePlanner(registry=registry)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +53,81 @@ logger = logging.getLogger("friday.core")
 # Global Active Trace Registry
 ACTIVE_TRACES = {}
 PENDING_APPROVALS: Dict[str, PendingApproval] = {}
+
+
+async def publish_execution_update(
+    nc: NATS,
+    trace_id: str,
+    source_component: str,
+    stage: str,
+    message: str,
+    progress_percentage: Optional[int] = None,
+):
+    event = ExecutionUpdateEvent(
+        metadata=EventMetadata(trace_id=trace_id, source_component=source_component),
+        payload=ExecutionUpdatePayload(
+            stage=stage,
+            message=message,
+            progress_percentage=progress_percentage,
+        ),
+    )
+    await nc.publish(f"friday.stream.{trace_id}", event.model_dump_json().encode())
+
+
+async def run_planner_with_progress(
+    nc: NATS,
+    trace_id: str,
+    planner: CognitivePlanner,
+    intent: str,
+    record: Optional[TraceRecord] = None,
+    heartbeat_interval_seconds: float = 2.0,
+):
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.planner",
+        stage="planning",
+        message="[PLANNER] Local model planning started...",
+    )
+    if record:
+        record.bump_heartbeat("planning_start")
+
+    planner_task = asyncio.create_task(planner.generate_plan(intent))
+
+    try:
+        while True:
+            try:
+                plan = await asyncio.wait_for(asyncio.shield(planner_task), timeout=heartbeat_interval_seconds)
+                break
+            except asyncio.TimeoutError:
+                await publish_execution_update(
+                    nc,
+                    trace_id=trace_id,
+                    source_component="core.planner",
+                    stage="planning",
+                    message="[PLANNER] Waiting for local model...",
+                )
+                if record:
+                    record.bump_heartbeat("planning_wait")
+    except Exception:
+        if not planner_task.done():
+            planner_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await planner_task
+        raise
+
+    if plan.validation.fallback_used and plan.validation.fallback_reason == "timeout":
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.planner",
+            stage="planning",
+            message="[PLANNER] Local planner timed out; using deterministic fallback.",
+        )
+        if record:
+            record.bump_heartbeat("planning_timeout_fallback")
+
+    return plan
 
 
 async def publish_failure_result(
@@ -218,7 +294,7 @@ async def main():
                 # 4. Invoke Cognitive Planner
                 await nc.publish(stream_subject, ExecutionUpdateEvent(
                     metadata=EventMetadata(trace_id=trace_id, source_component="core.planner"),
-                    payload=ExecutionUpdatePayload(stage="planning", message="Building deterministic execution plan...")
+                    payload=ExecutionUpdatePayload(stage="planning", message="[PLANNER] Analyzing intent...")
                 ).model_dump_json().encode())
                 if record: record.bump_heartbeat("planning")
                 
@@ -226,9 +302,20 @@ async def main():
                 plan = None
                 success = False
                 output = ""
-                
+
+                await nc.publish(stream_subject, ExecutionUpdateEvent(
+                    metadata=EventMetadata(trace_id=trace_id, source_component="core.planner"),
+                    payload=ExecutionUpdatePayload(stage="planning", message="[PLANNER] Constructing execution plan...")
+                ).model_dump_json().encode())
+
                 try:
-                    plan = await planner.generate_plan(intent.payload.raw_command)
+                    plan = await run_planner_with_progress(
+                        nc=nc,
+                        trace_id=trace_id,
+                        planner=planner,
+                        intent=intent.payload.raw_command,
+                        record=record,
+                    )
                 except ValueError as e:
                     await nc.publish(stream_subject, ExecutionUpdateEvent(
                         metadata=EventMetadata(trace_id=trace_id, source_component="core.planner"),
@@ -240,7 +327,15 @@ async def main():
                 if plan:
                     await nc.publish(stream_subject, ExecutionUpdateEvent(
                         metadata=EventMetadata(trace_id=trace_id, source_component="core.planner"),
-                        payload=ExecutionUpdatePayload(stage="planning", message=f"Plan created: {len(plan.steps)} capability steps. Estimated risk: {plan.estimated_risk}")
+                        payload=ExecutionUpdatePayload(
+                            stage="planning",
+                            message=(
+                                f"[PLANNER] Plan validated... "
+                                f"steps={len(plan.steps)} risk={plan.estimated_risk} "
+                                f"source={plan.validation.source} fallback={plan.validation.fallback_used} "
+                                f"fallback_reason={plan.validation.fallback_reason or 'none'}"
+                            )
+                        )
                     ).model_dump_json().encode())
                     
                     # 5. Execute Plan Sequentially

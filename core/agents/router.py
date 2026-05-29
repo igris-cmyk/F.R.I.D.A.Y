@@ -5,15 +5,13 @@ from typing import Dict, Any, TypedDict
 from langgraph.graph import StateGraph, END
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
+from core.config import FRIDAY_ROUTER_MODEL, OLLAMA_BASE_URL
 
 logger = logging.getLogger("friday.agents.router")
 
-OLLAMA_MODEL = "qwen2.5:7b" # Target local model
-OLLAMA_BASE_URL = "http://localhost:11434"
-
 # We instantiate the LLM, but it is strictly controlled
 llm = OllamaLLM(
-    model=OLLAMA_MODEL, 
+    model=FRIDAY_ROUTER_MODEL,
     base_url=OLLAMA_BASE_URL,
     temperature=0.0 # Strict determinism
 )
@@ -81,6 +79,16 @@ def is_conversational_greeting(cmd: str) -> bool:
     ]
     return normalized in greetings
 
+
+def is_research_request(cmd: str) -> bool:
+    normalized = cmd.strip().lower()
+    research_phrases = [
+        "analyze repository architecture",
+        "explain memory subsystem",
+        "show approval workflow",
+    ]
+    return normalized in research_phrases
+
 async def classify_intent(state: RouterState) -> RouterState:
     """
     Hybrid Intent Classifier.
@@ -113,6 +121,13 @@ async def classify_intent(state: RouterState) -> RouterState:
         state["parameters"] = {"query": cmd}
         state["routing_metadata"] = {"source": "heuristic", "confidence": 1.0, "latency_ms": int((time.time() - start_time)*1000)}
         logger.info("Router classified (heuristic): MEMORY")
+        return state
+
+    if is_research_request(cmd):
+        state["intent"] = "research"
+        state["parameters"] = {"message": cmd, "query": cmd}
+        state["routing_metadata"] = {"source": "heuristic", "confidence": 1.0, "latency_ms": int((time.time() - start_time)*1000)}
+        logger.info("Router classified (heuristic): RESEARCH")
         return state
 
     # 2. Cognitive Classification Fallback (Bounded Local LLM Inference)
@@ -155,7 +170,7 @@ async def classify_intent(state: RouterState) -> RouterState:
                 state["routing_metadata"] = {
                     "source": "cognitive_llm", 
                     "confidence": 0.85, 
-                    "model": OLLAMA_MODEL,
+                    "model": FRIDAY_ROUTER_MODEL,
                     "latency_ms": int((time.time() - start_time)*1000)
                 }
                 logger.info(f"Router classified (llm): {valid_intent.upper()} in {state['routing_metadata']['latency_ms']}ms")

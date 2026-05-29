@@ -32,7 +32,8 @@ class CapabilityRegistry:
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Glob pattern (e.g. *.py)"},
-                    "root": {"type": "string", "description": "Root directory to search from"}
+                    "root": {"type": "string", "description": "Root directory to search from"},
+                    "max_results": {"type": "integer", "description": "Maximum number of matching files to return"}
                 },
                 "required": ["pattern"]
             },

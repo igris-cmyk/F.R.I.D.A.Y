@@ -1,4 +1,5 @@
 import asyncio
+import fnmatch
 import time
 import os
 import subprocess
@@ -10,6 +11,20 @@ from core.security.permissions import SecurityPolicy, RiskLevel
 
 class CapabilityExecutor:
     """Deterministic execution boundary for system capabilities."""
+
+    DEFAULT_SEARCH_EXCLUDED_DIRS = {
+        ".git",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
+    DEFAULT_SEARCH_MAX_RESULTS = 500
     
     def __init__(self, registry: CapabilityRegistry, security_policy: SecurityPolicy):
         self.registry = registry
@@ -128,13 +143,43 @@ class CapabilityExecutor:
         if capability_id == "filesystem.search":
             pattern = invocation.input_payload.get("pattern", "")
             root = invocation.input_payload.get("root", invocation.context.workspace_root)
+            max_results = invocation.input_payload.get("max_results", self.DEFAULT_SEARCH_MAX_RESULTS)
+            try:
+                max_results = int(max_results)
+            except (TypeError, ValueError):
+                max_results = self.DEFAULT_SEARCH_MAX_RESULTS
+            max_results = max(1, min(max_results, self.DEFAULT_SEARCH_MAX_RESULTS))
+
             workspace_root, search_root = self._resolve_workspace_path(invocation.context.workspace_root, root)
-                
+
             results = []
-            for path in search_root.rglob(pattern):
-                if path.is_file():
+            truncated = False
+            for current_root, dirnames, filenames in os.walk(search_root, topdown=True):
+                dirnames[:] = [
+                    dirname for dirname in dirnames
+                    if dirname not in self.DEFAULT_SEARCH_EXCLUDED_DIRS
+                ]
+
+                for filename in filenames:
+                    if not fnmatch.fnmatch(filename, pattern):
+                        continue
+
+                    path = Path(current_root) / filename
                     results.append(str(path.relative_to(workspace_root)))
-            return {"files": results, "count": len(results)}
+                    if len(results) >= max_results:
+                        truncated = True
+                        break
+
+                if truncated:
+                    break
+
+            return {
+                "files": results,
+                "count": len(results),
+                "truncated": truncated,
+                "max_results": max_results,
+                "excluded_dirs": sorted(self.DEFAULT_SEARCH_EXCLUDED_DIRS),
+            }
             
         elif capability_id == "filesystem.read":
             path_str = invocation.input_payload.get("path", "")

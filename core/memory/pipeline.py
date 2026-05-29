@@ -8,12 +8,17 @@ from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
 from langchain_ollama import OllamaEmbeddings
 
+from core.config import FRIDAY_MEMORY_MODEL, OLLAMA_BASE_URL
 from core.memory.manager import memory_manager, MemoryHealthState, MemoryImportance
 
 logger = logging.getLogger("friday.memory.pipeline")
 
 # Primary Cognitive Model for Compression
-compression_llm = OllamaLLM(model="qwen2.5:7b", temperature=0.1)
+compression_llm = OllamaLLM(
+    model=FRIDAY_MEMORY_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=0.1,
+)
 
 # Embedding Model (Must be verified before use)
 try:

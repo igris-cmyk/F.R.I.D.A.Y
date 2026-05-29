@@ -6,6 +6,7 @@ from enum import Enum
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
 
+from core.config import FRIDAY_MEMORY_MODEL, OLLAMA_BASE_URL
 from core.memory.manager import memory_manager, MemoryHealthState
 from core.memory.pipeline import generate_embedding
 
@@ -26,7 +27,11 @@ class MemoryAgent:
     """
     def __init__(self):
         # Strict low temperature for reconstruction to prevent hallucinatory amplification
-        self.reconstruction_llm = OllamaLLM(model="qwen2.5:7b", temperature=0.0)
+        self.reconstruction_llm = OllamaLLM(
+            model=FRIDAY_MEMORY_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            temperature=0.0,
+        )
         
     async def recall_context(self, query: str, policy: RetrievalPolicy, current_workspace: str = None) -> Optional[Dict[str, Any]]:
         """
