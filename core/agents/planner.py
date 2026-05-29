@@ -384,7 +384,7 @@ class CognitivePlanner:
                     PlanStep(
                         capability_id="research.synthesize",
                         reason="Summarize discovered files.",
-                        input={"topic": "Architecture Summary", "context": context or intent},
+                        input={"topic": "Architecture Summary", "goal": intent},
                     ),
                 ],
                 estimated_risk="LOW",
@@ -402,7 +402,7 @@ class CognitivePlanner:
                     PlanStep(
                         capability_id="research.synthesize",
                         reason="Synthesize the requested architecture explanation.",
-                        input={"topic": intent.strip(), "context": context or intent},
+                        input={"topic": intent.strip(), "goal": intent},
                     ),
                 ],
                 estimated_risk="LOW",
@@ -420,7 +420,7 @@ class CognitivePlanner:
                     PlanStep(
                         capability_id="research.synthesize",
                         reason="Explain the memory subsystem using local context.",
-                        input={"topic": "Memory Subsystem", "context": context or intent},
+                        input={"topic": "Memory Subsystem", "goal": intent},
                     ),
                 ],
                 estimated_risk="LOW",

@@ -1,12 +1,17 @@
 import asyncio
 import fnmatch
+import json
 import time
 import os
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict
+from langchain_core.prompts import PromptTemplate
+from langchain_ollama import OllamaLLM
 from core.capabilities.contracts import CapabilityInvocation, CapabilityResult, CapabilityFailure, CapabilityRequiresApproval
 from core.capabilities.registry import CapabilityRegistry
+from core.config import FRIDAY_RESEARCH_MODEL, OLLAMA_BASE_URL
 from core.security.permissions import SecurityPolicy, RiskLevel
 
 class CapabilityExecutor:
@@ -25,6 +30,10 @@ class CapabilityExecutor:
         ".ruff_cache",
     }
     DEFAULT_SEARCH_MAX_RESULTS = 500
+    SYNTHESIS_MAX_FILES = 8
+    SYNTHESIS_MAX_CHARS_PER_FILE = 4000
+    SYNTHESIS_MAX_TOTAL_CHARS = 20000
+    SYNTHESIS_LLM_TIMEOUT_SECONDS = 8.0
     
     def __init__(self, registry: CapabilityRegistry, security_policy: SecurityPolicy):
         self.registry = registry
@@ -194,7 +203,7 @@ class CapabilityExecutor:
                 
             try:
                 content = target_path.read_text(encoding="utf-8")
-                return {"content": content, "size": file_size, "truncated": False}
+                return {"path": str(target_path.relative_to(workspace_root)), "content": content, "size": file_size, "truncated": False}
             except UnicodeDecodeError:
                 raise ValueError("Binary files are not supported.")
                 
@@ -230,8 +239,162 @@ class CapabilityExecutor:
             return {"memory": f"Simulated recall for: {query}", "confidence": 0.8}
             
         elif capability_id == "research.synthesize":
-            topic = invocation.input_payload.get("topic")
-            return {"synthesis": f"Simulated synthesis of topic: {topic}", "tokens": 42}
+            return await self._execute_research_synthesis(invocation)
             
         else:
             raise ValueError(f"No implementation found for {capability_id}")
+
+    async def _execute_research_synthesis(self, invocation: CapabilityInvocation) -> Dict[str, Any]:
+        topic = invocation.input_payload.get("topic", invocation.context.source_intent)
+        goal = invocation.input_payload.get("goal", topic)
+        context = self._normalize_synthesis_context(invocation.input_payload.get("context", []))
+        previous_results = invocation.input_payload.get("previous_results", [])
+
+        if context and self._ollama_model_available(FRIDAY_RESEARCH_MODEL):
+            try:
+                synthesis = await self._synthesize_with_llm(topic=topic, goal=goal, context=context)
+                return {
+                    "synthesis": synthesis,
+                    "grounded": True,
+                    "llm_used": True,
+                    "fallback_reason": None,
+                    "inspected_files": [item["path"] for item in context],
+                    "context_file_count": len(context),
+                    "previous_result_count": len(previous_results),
+                }
+            except Exception as exc:
+                fallback = self._deterministic_grounded_summary(topic, context, reason=str(exc))
+                fallback["previous_result_count"] = len(previous_results)
+                return fallback
+
+        fallback_reason = "no_context" if not context else f"local_model_unavailable:{FRIDAY_RESEARCH_MODEL}"
+        fallback = self._deterministic_grounded_summary(topic, context, reason=fallback_reason)
+        fallback["previous_result_count"] = len(previous_results)
+        return fallback
+
+    def _normalize_synthesis_context(self, raw_context: Any) -> list[Dict[str, Any]]:
+        if not isinstance(raw_context, list):
+            return []
+
+        normalized: list[Dict[str, Any]] = []
+        total_chars = 0
+        for item in raw_context[:self.SYNTHESIS_MAX_FILES]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", "unknown"))
+            if any(part in self.DEFAULT_SEARCH_EXCLUDED_DIRS for part in path.replace("\\", "/").split("/")):
+                continue
+
+            content = str(item.get("content", ""))
+            remaining = self.SYNTHESIS_MAX_TOTAL_CHARS - total_chars
+            if remaining <= 0:
+                break
+
+            limit = min(self.SYNTHESIS_MAX_CHARS_PER_FILE, remaining)
+            bounded_content = content[:limit]
+            total_chars += len(bounded_content)
+            normalized.append({
+                "path": path,
+                "content": bounded_content,
+                "size": int(item.get("size", len(content))),
+                "truncated": bool(item.get("truncated", False)) or len(content) > len(bounded_content),
+            })
+
+        return normalized
+
+    def _ollama_model_available(self, model: str) -> bool:
+        try:
+            with urllib.request.urlopen(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags", timeout=0.5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            model_names = {
+                entry.get("model") or entry.get("name")
+                for entry in payload.get("models", [])
+                if isinstance(entry, dict)
+            }
+            return model in model_names
+        except Exception:
+            return False
+
+    async def _synthesize_with_llm(self, topic: str, goal: str, context: list[Dict[str, Any]]) -> str:
+        context_block = "\n\n".join(
+            f"File: {item['path']}\nSize: {item['size']}\nTruncated: {item['truncated']}\nContent:\n{item['content']}"
+            for item in context
+        )
+        prompt = PromptTemplate.from_template(
+            "You are F.R.I.D.A.Y. Produce a concise, grounded technical synthesis.\n"
+            "Use only the provided repository context. Cite file paths when making claims.\n\n"
+            "Topic: {topic}\n"
+            "Goal: {goal}\n\n"
+            "Repository context:\n{context_block}\n\n"
+            "Synthesis:"
+        )
+        chain = prompt | OllamaLLM(
+            model=FRIDAY_RESEARCH_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            temperature=0.1,
+        )
+        result = await asyncio.wait_for(
+            chain.ainvoke({"topic": topic, "goal": goal, "context_block": context_block}),
+            timeout=self.SYNTHESIS_LLM_TIMEOUT_SECONDS,
+        )
+        return result.strip()
+
+    def _deterministic_grounded_summary(
+        self,
+        topic: str,
+        context: list[Dict[str, Any]],
+        reason: str,
+    ) -> Dict[str, Any]:
+        lines = [f"Grounded repository summary for: {topic}", "", "Inspected files:"]
+        if not context:
+            lines.extend([
+                "- No file contents were available for synthesis.",
+                "",
+                "Limitations:",
+                f"- Local semantic synthesis unavailable: {reason}.",
+            ])
+            return {
+                "synthesis": "\n".join(lines),
+                "grounded": False,
+                "llm_used": False,
+                "fallback_reason": reason,
+                "inspected_files": [],
+                "context_file_count": 0,
+            }
+
+        for index, item in enumerate(context, start=1):
+            lines.append(f"{index}. {item['path']}")
+            lines.append(f"   - {self._describe_file(item['path'], item['content'])}")
+            if item["truncated"]:
+                lines.append("   - Content was truncated to stay within the synthesis budget.")
+
+        lines.extend([
+            "",
+            "Limitations:",
+            f"- Local semantic synthesis unavailable: {reason}.",
+            "- Summary is based on bounded file previews and path-level structure.",
+        ])
+        return {
+            "synthesis": "\n".join(lines),
+            "grounded": True,
+            "llm_used": False,
+            "fallback_reason": reason,
+            "inspected_files": [item["path"] for item in context],
+            "context_file_count": len(context),
+        }
+
+    def _describe_file(self, path: str, content: str) -> str:
+        lowered = content.lower()
+        if path == "core/main.py" or "nats" in lowered or "active_traces" in lowered:
+            return "Orchestrator flow, NATS streaming, trace lifecycle, planning, and capability execution."
+        if "capabilityexecutor" in lowered or "security_policy" in lowered:
+            return "Capability execution boundary with registry lookup, policy checks, timeout handling, and implementations."
+        if "securitypolicy" in lowered or "risklevel" in lowered:
+            return "Security policy and risk evaluation for capability authorization."
+        if "memory" in path or "memory" in lowered:
+            return "Memory retrieval, compression, persistence, or reconstruction logic."
+        if "router" in path or "classify_intent" in lowered:
+            return "Intent routing and classification logic."
+        if "planner" in path or "generate_plan" in lowered:
+            return "Planner schema, fallback behavior, and capability plan construction."
+        return "Repository source file included in the bounded synthesis context."

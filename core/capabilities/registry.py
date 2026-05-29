@@ -119,7 +119,25 @@ class CapabilityRegistry:
                 "type": "object",
                 "properties": {
                     "topic": {"type": "string", "description": "Topic to synthesize"},
-                    "context": {"type": "string", "description": "Raw context to synthesize from"}
+                    "goal": {"type": "string", "description": "Synthesis goal"},
+                    "context": {
+                        "type": "array",
+                        "description": "Bounded file context records for grounded synthesis",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                                "size": {"type": "integer"},
+                                "truncated": {"type": "boolean"}
+                            },
+                            "required": ["path", "content", "size", "truncated"]
+                        }
+                    },
+                    "previous_results": {
+                        "type": "array",
+                        "description": "Prior capability results from this trace"
+                    }
                 },
                 "required": ["topic"]
             },

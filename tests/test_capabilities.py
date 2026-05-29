@@ -472,6 +472,98 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(res.success)
             self.assertEqual(res.data["count"], 2)
             self.assertTrue(res.data["truncated"])
+
+    async def test_research_synthesize_uses_grounded_context_without_simulation(self):
+        original_availability = self.executor._ollama_model_available
+        self.executor._ollama_model_available = lambda model: False
+        try:
+            inv = CapabilityInvocation(
+                capability_id="research.synthesize",
+                input_payload={
+                    "topic": "analyze repository architecture",
+                    "context": [
+                        {
+                            "path": "core/main.py",
+                            "content": "NATS ACTIVE_TRACES planner capability execution streaming",
+                            "size": 56,
+                            "truncated": False,
+                        }
+                    ],
+                },
+                context=CapabilityExecutionContext(trace_id="test", source_intent="analyze repository architecture")
+            )
+            res = await self.executor.execute(inv)
+        finally:
+            self.executor._ollama_model_available = original_availability
+
+        self.assertTrue(res.success)
+        self.assertNotIn("Simulated synthesis", res.data["synthesis"])
+        self.assertIn("core/main.py", res.data["synthesis"])
+        self.assertTrue(res.data["grounded"])
+        self.assertFalse(res.data["llm_used"])
+
+    async def test_research_synthesize_context_respects_max_file_count(self):
+        original_availability = self.executor._ollama_model_available
+        self.executor._ollama_model_available = lambda model: False
+        try:
+            inv = CapabilityInvocation(
+                capability_id="research.synthesize",
+                input_payload={
+                    "topic": "test",
+                    "context": [
+                        {"path": f"core/file_{index}.py", "content": "print('x')", "size": 10, "truncated": False}
+                        for index in range(12)
+                    ],
+                },
+                context=CapabilityExecutionContext(trace_id="test", source_intent="test")
+            )
+            res = await self.executor.execute(inv)
+        finally:
+            self.executor._ollama_model_available = original_availability
+
+        self.assertTrue(res.success)
+        self.assertEqual(res.data["context_file_count"], self.executor.SYNTHESIS_MAX_FILES)
+        self.assertNotIn("core/file_8.py", res.data["inspected_files"])
+
+    async def test_research_synthesize_context_respects_max_total_chars(self):
+        original_availability = self.executor._ollama_model_available
+        self.executor._ollama_model_available = lambda model: False
+        try:
+            inv = CapabilityInvocation(
+                capability_id="research.synthesize",
+                input_payload={
+                    "topic": "test",
+                    "context": [
+                        {"path": f"core/file_{index}.py", "content": "x" * 5000, "size": 5000, "truncated": False}
+                        for index in range(8)
+                    ],
+                },
+                context=CapabilityExecutionContext(trace_id="test", source_intent="test")
+            )
+            res = await self.executor.execute(inv)
+        finally:
+            self.executor._ollama_model_available = original_availability
+
+        self.assertTrue(res.success)
+        self.assertEqual(res.data["context_file_count"], 5)
+        self.assertIn("Content was truncated", res.data["synthesis"])
+
+    async def test_invalid_file_read_fails_safely(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            inv = CapabilityInvocation(
+                capability_id="filesystem.read",
+                input_payload={"path": "missing.py"},
+                context=CapabilityExecutionContext(
+                    trace_id="test",
+                    source_intent="read missing.py",
+                    workspace_root=tmp_dir
+                )
+            )
+            res = await self.executor.execute(inv)
+
+        self.assertFalse(res.success)
+        self.assertEqual(res.error_code, "EXECUTION_ERROR")
+        self.assertIn("File not found", res.message)
         
     async def test_capability_timeout_enforcement(self):
         # Register a fake capability that hangs

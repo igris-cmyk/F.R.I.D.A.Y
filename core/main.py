@@ -6,7 +6,7 @@ import json
 import logging
 from nats.aio.client import Client as NATS
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 import time
 
 from core.schemas.events import (
@@ -53,6 +53,188 @@ logger = logging.getLogger("friday.core")
 # Global Active Trace Registry
 ACTIVE_TRACES = {}
 PENDING_APPROVALS: Dict[str, PendingApproval] = {}
+
+WORKFLOW_MAX_FILES_TO_READ = 8
+WORKFLOW_MAX_CHARS_PER_FILE = 4000
+WORKFLOW_MAX_TOTAL_CONTEXT_CHARS = 20000
+WORKFLOW_EXCLUDED_DIRS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
+WORKFLOW_PRIORITY_PREFIXES = (
+    "core/main.py",
+    "core/agents/",
+    "core/capabilities/",
+    "core/security/",
+    "core/memory/",
+    "apps/desktop/src/",
+    "apps/desktop/src-tauri/src/",
+)
+WORKFLOW_SOURCE_EXTENSIONS = (".py", ".js", ".rs", ".toml", ".json", ".md")
+
+
+def create_workflow_context(trace_id: str, original_intent: str) -> Dict[str, Any]:
+    return {
+        "trace_id": trace_id,
+        "original_intent": original_intent,
+        "step_results": [],
+        "last_result": None,
+        "files_found": [],
+        "files_read": [],
+        "synthesis_inputs": [],
+        "metadata": {},
+    }
+
+
+def is_generated_or_dependency_path(path: str) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    return any(part in WORKFLOW_EXCLUDED_DIRS for part in parts)
+
+
+def select_files_for_synthesis(files: List[str], max_files: int = WORKFLOW_MAX_FILES_TO_READ) -> List[str]:
+    candidates = [
+        file_path for file_path in files
+        if not is_generated_or_dependency_path(file_path)
+        and file_path.endswith(WORKFLOW_SOURCE_EXTENSIONS)
+    ]
+
+    def priority_key(path: str) -> tuple[int, int, str]:
+        for index, prefix in enumerate(WORKFLOW_PRIORITY_PREFIXES):
+            if path == prefix or path.startswith(prefix):
+                return (0, index, path)
+        return (1, len(path), path)
+
+    return sorted(dict.fromkeys(candidates), key=priority_key)[:max_files]
+
+
+def add_file_to_workflow_context(
+    workflow_context: Dict[str, Any],
+    path: str,
+    content: str,
+    size: int,
+    truncated: bool,
+) -> Optional[Dict[str, Any]]:
+    used_chars = sum(len(item["content"]) for item in workflow_context["files_read"])
+    remaining = WORKFLOW_MAX_TOTAL_CONTEXT_CHARS - used_chars
+    if remaining <= 0:
+        return None
+
+    char_limit = min(WORKFLOW_MAX_CHARS_PER_FILE, remaining)
+    bounded_content = content[:char_limit]
+    file_record = {
+        "path": path,
+        "content": bounded_content,
+        "size": size,
+        "truncated": truncated or len(content) > len(bounded_content),
+    }
+    workflow_context["files_read"].append(file_record)
+    workflow_context["synthesis_inputs"] = workflow_context["files_read"]
+    return file_record
+
+
+def capture_workflow_result(
+    workflow_context: Dict[str, Any],
+    capability_id: str,
+    data: Dict[str, Any],
+) -> None:
+    result_record = {"capability_id": capability_id, "data": data}
+    workflow_context["step_results"].append(result_record)
+    workflow_context["last_result"] = result_record
+
+    if capability_id == "filesystem.search":
+        files = data.get("files", [])
+        workflow_context["files_found"].extend(
+            file_path for file_path in files
+            if file_path not in workflow_context["files_found"]
+        )
+
+    if capability_id == "filesystem.read" and data.get("content") is not None:
+        path = data.get("path")
+        if path:
+            add_file_to_workflow_context(
+                workflow_context=workflow_context,
+                path=path,
+                content=data.get("content", ""),
+                size=data.get("size", 0),
+                truncated=data.get("truncated", False),
+            )
+
+
+def build_synthesis_payload(
+    workflow_context: Dict[str, Any],
+    topic: str,
+    step_input: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = dict(step_input)
+    payload["topic"] = payload.get("topic") or topic
+    payload["goal"] = payload.get("goal") or workflow_context["original_intent"]
+    if workflow_context["files_read"]:
+        payload["context"] = workflow_context["files_read"]
+    payload["previous_results"] = workflow_context["step_results"]
+    return payload
+
+
+async def read_selected_files_for_workflow(
+    nc: NATS,
+    trace_id: str,
+    executor: CapabilityExecutor,
+    workflow_context: Dict[str, Any],
+    capability_context: CapabilityExecutionContext,
+    record: Optional[TraceRecord] = None,
+) -> List[Dict[str, Any]]:
+    selected_files = select_files_for_synthesis(workflow_context["files_found"])
+    if not selected_files:
+        return []
+
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.workflow",
+        stage="planning",
+        message=f"[WORKFLOW] Selected {len(selected_files)} files for synthesis.",
+    )
+
+    bound_reads = []
+    for path in selected_files:
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.executor",
+            stage="capability_execution",
+            message="[CAPABILITY] filesystem.read started: Reading selected files for grounded synthesis.",
+        )
+        if record:
+            record.bump_heartbeat("workflow_read_binding")
+
+        invocation = CapabilityInvocation(
+            capability_id="filesystem.read",
+            input_payload={"path": path},
+            context=capability_context,
+        )
+        result = await executor.execute(invocation)
+        if not getattr(result, "success", False):
+            logger.warning("Workflow-bound filesystem.read failed for %s: %s", path, getattr(result, "message", ""))
+            continue
+
+        capture_workflow_result(workflow_context, "filesystem.read", result.data)
+        bound_reads.append(result.data)
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.executor",
+            stage="capability_execution",
+            message="[CAPABILITY] filesystem.read completed successfully.",
+        )
+
+    return bound_reads
 
 
 async def publish_execution_update(
@@ -341,22 +523,71 @@ async def main():
                     # 5. Execute Plan Sequentially
                     results = []
                     success = True
+                    workflow_context = create_workflow_context(
+                        trace_id=trace_id,
+                        original_intent=intent.payload.raw_command,
+                    )
                     
                     for step in plan.steps:
+                        step_input = dict(step.input)
+                        capability_context = CapabilityExecutionContext(
+                            trace_id=trace_id,
+                            source_intent=intent.payload.raw_command,
+                            workspace_root=intent.payload.working_directory or "."
+                        )
+
+                        if step.capability_id == "filesystem.read" and not step_input.get("path"):
+                            bound_reads = await read_selected_files_for_workflow(
+                                nc=nc,
+                                trace_id=trace_id,
+                                executor=executor,
+                                workflow_context=workflow_context,
+                                capability_context=capability_context,
+                                record=record,
+                            )
+                            results.append(f"SUCCESS filesystem.read: bound {len(bound_reads)} files for synthesis")
+                            continue
+
+                        if step.capability_id == "research.synthesize":
+                            if workflow_context["files_found"] and not workflow_context["files_read"]:
+                                await publish_execution_update(
+                                    nc,
+                                    trace_id=trace_id,
+                                    source_component="core.workflow",
+                                    stage="planning",
+                                    message="[WORKFLOW] Binding search results into synthesis context...",
+                                )
+                                await read_selected_files_for_workflow(
+                                    nc=nc,
+                                    trace_id=trace_id,
+                                    executor=executor,
+                                    workflow_context=workflow_context,
+                                    capability_context=capability_context,
+                                    record=record,
+                                )
+
+                            step_input = build_synthesis_payload(
+                                workflow_context=workflow_context,
+                                topic=intent.payload.raw_command,
+                                step_input=step_input,
+                            )
+                            start_message = (
+                                f"[CAPABILITY] research.synthesize started: "
+                                f"Grounded synthesis from {len(workflow_context['files_read'])} files."
+                            )
+                        else:
+                            start_message = f"[CAPABILITY] {step.capability_id} started: {step.reason}"
+
                         await nc.publish(stream_subject, ExecutionUpdateEvent(
                             metadata=EventMetadata(trace_id=trace_id, source_component="core.executor"),
-                            payload=ExecutionUpdatePayload(stage="capability_execution", message=f"[CAPABILITY] {step.capability_id} started: {step.reason}")
+                            payload=ExecutionUpdatePayload(stage="capability_execution", message=start_message)
                         ).model_dump_json().encode())
                         if record: record.bump_heartbeat(f"capability:{step.capability_id}")
                         
                         invocation = CapabilityInvocation(
                             capability_id=step.capability_id,
-                            input_payload=step.input,
-                            context=CapabilityExecutionContext(
-                                trace_id=trace_id,
-                                source_intent=intent.payload.raw_command,
-                                workspace_root=intent.payload.working_directory or "."
-                            ),
+                            input_payload=step_input,
+                            context=capability_context,
                             requires_confirmation=plan.requires_confirmation
                         )
                         
@@ -377,7 +608,7 @@ async def main():
                                     risk_level=res.risk_level,
                                     reason=res.reason,
                                     requested_action_summary=step.reason,
-                                    input_preview=json.dumps(step.input),
+                                    input_preview=json.dumps(step_input),
                                     timeout_seconds=30,
                                     expires_at=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
                                 )
@@ -428,6 +659,15 @@ async def main():
                             success = False
                             break
                         else:
+                            capture_workflow_result(workflow_context, step.capability_id, getattr(res, "data", {}))
+                            if step.capability_id == "filesystem.search":
+                                await publish_execution_update(
+                                    nc,
+                                    trace_id=trace_id,
+                                    source_component="core.workflow",
+                                    stage="planning",
+                                    message="[WORKFLOW] Captured filesystem.search output.",
+                                )
                             await nc.publish(stream_subject, ExecutionUpdateEvent(
                                 metadata=EventMetadata(trace_id=trace_id, source_component="core.executor"),
                                 payload=ExecutionUpdatePayload(stage="capability_execution", message=f"[CAPABILITY] {step.capability_id} completed successfully.")
