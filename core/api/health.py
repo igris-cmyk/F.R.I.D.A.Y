@@ -31,7 +31,7 @@ async def broadcast_health_telemetry(nc: NATS, active_traces: Dict[str, Any]):
             
             # Memory Health Mapping
             sys_status = "healthy"
-            if memory_manager.health == MemoryHealthState.OFFLINE:
+            if memory_manager.health_state == MemoryHealthState.OFFLINE:
                 sys_status = "degraded"
             elif stalled_count > 0:
                 sys_status = "recovering"

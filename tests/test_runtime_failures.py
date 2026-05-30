@@ -14,6 +14,8 @@ from core.main import (
     build_synthesis_payload,
     capture_workflow_result,
     create_workflow_context,
+    execute_memory_recall,
+    log_memory_pipeline_task_result,
     publish_failure_result,
     read_selected_files_for_workflow,
     run_planner_with_progress,
@@ -82,6 +84,16 @@ class TimeoutFallbackPlanner:
         )
 
 
+class FakeMemoryAgent:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def recall_context(self, query, policy, current_workspace=None):
+        self.calls.append((query, policy, current_workspace))
+        return self.result
+
+
 class TestRuntimeFailures(unittest.IsolatedAsyncioTestCase):
     async def test_publish_failure_result_emits_execution_result_event(self):
         nc = FakeNATS()
@@ -102,6 +114,60 @@ class TestRuntimeFailures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["payload"]["status"], "failure")
         self.assertEqual(event["payload"]["error"], "boom")
         self.assertEqual(event["payload"]["execution_time_ms"], 12)
+
+    async def test_memory_pipeline_task_exception_is_observed(self):
+        async def failing_task():
+            raise RuntimeError("memory boom")
+
+        task = asyncio.create_task(failing_task())
+        await asyncio.sleep(0)
+
+        with self.assertLogs("friday.core", level="ERROR") as logs:
+            log_memory_pipeline_task_result(task)
+
+        self.assertTrue(any("Background task failed" in line for line in logs.output))
+
+    async def test_execute_memory_recall_returns_stored_memory_and_streams(self):
+        nc = FakeNATS()
+        agent = FakeMemoryAgent({
+            "narrative": "We inspected the memory subsystem implementation.",
+            "lineage": {
+                "source_trace_ids": ["trace-memory"],
+                "candidate_count": 1,
+            },
+        })
+
+        output = await execute_memory_recall(
+            nc,
+            trace_id="trace-recall",
+            query="what did we just inspect about memory?",
+            environment={"working_directory": "/repo"},
+            agent=agent,
+        )
+
+        self.assertIn("memory subsystem", output)
+        self.assertIn("trace-memory", output)
+        self.assertEqual(len(agent.calls), 1)
+        self.assertEqual(len(nc.published), 2)
+        messages = [json.loads(payload.decode())["payload"]["message"] for _, payload in nc.published]
+        self.assertIn("[MEMORY] Searching persistent memory...", messages)
+        self.assertIn("[MEMORY] Retrieved 1 relevant memories.", messages)
+
+    async def test_execute_memory_recall_empty_memory_is_explicit(self):
+        nc = FakeNATS()
+        agent = FakeMemoryAgent(None)
+
+        output = await execute_memory_recall(
+            nc,
+            trace_id="trace-empty",
+            query="what did we do earlier?",
+            environment={},
+            agent=agent,
+        )
+
+        self.assertEqual(output, "No relevant continuity found.")
+        messages = [json.loads(payload.decode())["payload"]["message"] for _, payload in nc.published]
+        self.assertIn("[MEMORY] No relevant continuity found.", messages)
 
     async def test_run_planner_with_progress_emits_waiting_updates(self):
         nc = FakeNATS()

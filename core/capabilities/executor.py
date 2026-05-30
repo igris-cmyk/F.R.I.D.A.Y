@@ -16,6 +16,7 @@ from core.config import (
     FRIDAY_RESEARCH_TIMEOUT_SECONDS,
     OLLAMA_BASE_URL,
 )
+from core.memory.manager import memory_manager
 from core.security.permissions import SecurityPolicy, RiskLevel
 
 class CapabilityExecutor:
@@ -240,7 +241,13 @@ class CapabilityExecutor:
             
         elif capability_id == "memory.recall":
             query = invocation.input_payload.get("query")
-            return {"memory": f"Simulated recall for: {query}", "confidence": 0.8}
+            memories = await memory_manager.retrieve_relevant_context(query, limit=5, min_score=0.05)
+            return {
+                "query": query,
+                "memories": memories,
+                "count": len(memories),
+                "message": "No relevant continuity found." if not memories else "Relevant continuity retrieved.",
+            }
             
         elif capability_id == "research.synthesize":
             return await self._execute_research_synthesis(invocation)

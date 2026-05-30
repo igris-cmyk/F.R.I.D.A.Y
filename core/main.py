@@ -27,6 +27,7 @@ from core.schemas.events import (
     CapabilityDeniedPayload
 )
 from core.agents.router import intent_router
+from core.agents.memory_agent import RetrievalPolicy, memory_agent
 from core.memory.manager import memory_manager
 from core.memory.pipeline import process_completed_trace
 from core.supervision.heartbeat import HeartbeatMonitor, TraceRecord, SupervisionState
@@ -399,6 +400,64 @@ async def publish_failure_result(
     )
     await nc.publish(f"friday.stream.{trace_id}", result_event.model_dump_json().encode())
 
+
+async def execute_memory_recall(
+    nc: NATS,
+    trace_id: str,
+    query: str,
+    environment: Dict[str, Any],
+    agent=memory_agent,
+) -> str:
+    stream_subject = f"friday.stream.{trace_id}"
+    await nc.publish(stream_subject, ExecutionUpdateEvent(
+        metadata=EventMetadata(trace_id=trace_id, source_component="core.agent.memory"),
+        payload=ExecutionUpdatePayload(
+            stage="memory_retrieval",
+            message="[MEMORY] Searching persistent memory...",
+            progress_percentage=75,
+        )
+    ).model_dump_json().encode())
+
+    recall_result = await agent.recall_context(
+        query,
+        RetrievalPolicy.PROJECT_RECALL,
+        current_workspace=(environment or {}).get("working_directory") or (environment or {}).get("workspace_root"),
+    )
+
+    if not recall_result:
+        await nc.publish(stream_subject, ExecutionUpdateEvent(
+            metadata=EventMetadata(trace_id=trace_id, source_component="core.agent.memory"),
+            payload=ExecutionUpdatePayload(
+                stage="memory_retrieval",
+                message="[MEMORY] No relevant continuity found.",
+                progress_percentage=90,
+            )
+        ).model_dump_json().encode())
+        return "No relevant continuity found."
+
+    retrieved_count = recall_result.get("lineage", {}).get("candidate_count", 0)
+    await nc.publish(stream_subject, ExecutionUpdateEvent(
+        metadata=EventMetadata(trace_id=trace_id, source_component="core.agent.memory"),
+        payload=ExecutionUpdatePayload(
+            stage="memory_retrieval",
+            message=f"[MEMORY] Retrieved {retrieved_count} relevant memories.",
+            progress_percentage=90,
+        )
+    ).model_dump_json().encode())
+    source_trace_ids = recall_result.get("lineage", {}).get("source_trace_ids", [])
+    sources = ", ".join(source_trace_ids) if source_trace_ids else "none"
+    return f"{recall_result['narrative']}\n\nSources: {sources}"
+
+
+def log_memory_pipeline_task_result(task: asyncio.Task):
+    try:
+        result = task.result()
+        logger.info("[MEMORY PIPELINE] Background task completed: %s", result)
+    except asyncio.CancelledError:
+        logger.warning("[MEMORY PIPELINE] Background task was cancelled.")
+    except Exception as exc:
+        logger.exception("[MEMORY PIPELINE] Background task failed: %s", exc)
+
 async def supervision_loop(nc: NATS):
     """
     Background worker that scans ACTIVE_TRACES every 5 seconds.
@@ -522,11 +581,9 @@ async def main():
             exec_ms = 0
             
             if intent_type == "memory":
-                await nc.publish(stream_subject, ExecutionUpdateEvent(
-                    metadata=EventMetadata(trace_id=trace_id, source_component="core.agent.memory"),
-                    payload=ExecutionUpdatePayload(stage="memory_retrieval", message="Scanning continuous memory...", progress_percentage=75)
-                ).model_dump_json().encode())
-                output = f"[Conversational Response] Recalling memory for: {final_state['parameters'].get('query')}"
+                query = final_state["parameters"].get("query") or intent.payload.raw_command
+                environment = intent.payload.environment.model_dump() if intent.payload.environment else {}
+                output = await execute_memory_recall(nc, trace_id, query, environment)
                 success = True
             elif intent_type == "conversation":
                 output = f"[Conversational Response] Acknowledged: {final_state['parameters'].get('message')}"
@@ -739,7 +796,7 @@ async def main():
             
             # Memory Hook: Trigger asynchronous cognitive compression pipeline
             # This is fire-and-forget; it must NOT block the orchestrator or routing loops.
-            asyncio.create_task(
+            memory_task = asyncio.create_task(
                 process_completed_trace(
                     trace_id=trace_id,
                     intent=intent_type,
@@ -750,6 +807,7 @@ async def main():
                     metadata={"routing": routing_metadata, "execution_ms": exec_ms}
                 )
             )
+            memory_task.add_done_callback(log_memory_pipeline_task_result)
             
             # 4. Final Result Event
             result_metadata = EventMetadata(

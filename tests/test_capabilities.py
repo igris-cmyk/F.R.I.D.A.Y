@@ -276,6 +276,29 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(router_state["intent"], "conversation")
 
+    async def test_natural_recall_question_routes_to_memory(self):
+        router_state = await classify_intent({
+            "raw_command": "what did we just inspect about memory?",
+            "environment": {},
+            "intent": "",
+            "parameters": {},
+            "error": "",
+            "routing_metadata": {},
+        })
+        self.assertEqual(router_state["intent"], "memory")
+        self.assertEqual(router_state["parameters"]["query"], "what did we just inspect about memory?")
+
+    async def test_general_education_question_remains_conversation(self):
+        router_state = await classify_intent({
+            "raw_command": "what are loops in JS?",
+            "environment": {},
+            "intent": "",
+            "parameters": {},
+            "error": "",
+            "routing_metadata": {},
+        })
+        self.assertEqual(router_state["intent"], "conversation")
+
     async def test_research_requests_route_without_llm_dependency(self):
         for command in (
             "analyze repository architecture",

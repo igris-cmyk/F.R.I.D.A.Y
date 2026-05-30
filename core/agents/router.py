@@ -80,6 +80,54 @@ def is_conversational_greeting(cmd: str) -> bool:
     return normalized in greetings
 
 
+def is_general_conversation_request(cmd: str) -> bool:
+    normalized = " ".join(cmd.strip().lower().split())
+    conversation_prefixes = [
+        "how are you",
+        "tell me a joke",
+        "what are ",
+        "what is ",
+        "explain what ",
+        "explain how ",
+    ]
+    return any(normalized.startswith(prefix) for prefix in conversation_prefixes)
+
+
+def is_memory_recall_request(cmd: str) -> bool:
+    normalized = " ".join(cmd.strip().lower().split())
+    recall_phrases = [
+        "what did we just",
+        "what did we work on",
+        "what did we do",
+        "what did i do",
+        "what changed with",
+        "what happened with",
+        "what did we inspect",
+        "what did we look at",
+        "recall ",
+        "remember ",
+        "remind me",
+        "summarize our recent",
+        "our recent",
+        "recently",
+        "earlier",
+    ]
+    if any(phrase in normalized for phrase in recall_phrases):
+        return True
+
+    topic_terms = [
+        "planner timeout",
+        "approval workflow",
+        "memory work",
+        "memory subsystem",
+        "repository architecture",
+        "research ranking",
+    ]
+    return any(term in normalized for term in topic_terms) and any(
+        cue in normalized for cue in ["what", "recall", "remind", "changed", "happened", "inspect"]
+    )
+
+
 def is_research_request(cmd: str) -> bool:
     normalized = cmd.strip().lower()
     research_phrases = [
@@ -100,8 +148,6 @@ async def classify_intent(state: RouterState) -> RouterState:
     start_time = time.time()
     
     # 1. Fast-Path Heuristic Evaluation (Sub-millisecond)
-    memory_indicators = ["remember", "what did i do", "search", "recall"]
-    
     if is_operational_command(cmd):
         state["intent"] = "terminal"
         state["parameters"] = {"executable_command": cmd}
@@ -109,14 +155,14 @@ async def classify_intent(state: RouterState) -> RouterState:
         logger.info(f"Router classified (heuristic): TERMINAL -> {state['parameters']['executable_command']}")
         return state
 
-    if is_conversational_greeting(cmd):
+    if is_conversational_greeting(cmd) or is_general_conversation_request(cmd):
         state["intent"] = "conversation"
         state["parameters"] = {"message": cmd}
         state["routing_metadata"] = {"source": "heuristic", "confidence": 1.0, "latency_ms": int((time.time() - start_time)*1000)}
         logger.info("Router classified (heuristic): CONVERSATION")
         return state
 
-    if any(cmd.lower().startswith(ind) for ind in memory_indicators):
+    if is_memory_recall_request(cmd):
         state["intent"] = "memory"
         state["parameters"] = {"query": cmd}
         state["routing_metadata"] = {"source": "heuristic", "confidence": 1.0, "latency_ms": int((time.time() - start_time)*1000)}

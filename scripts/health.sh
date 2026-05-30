@@ -102,4 +102,13 @@ else
   status=1
 fi
 
+memory_db_path="${FRIDAY_MEMORY_DB_PATH:-.friday/memory/friday_memory.sqlite3}"
+memory_db_dir="$(dirname "${memory_db_path}")"
+if mkdir -p "${memory_db_dir}" 2>/dev/null && [[ -w "${memory_db_dir}" ]]; then
+  ok "Memory DB path writable: ${memory_db_path}"
+else
+  missing "Memory DB path not writable: ${memory_db_path}"
+  status=1
+fi
+
 exit "${status}"

@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.zip
 .friday/
+*.sqlite3
+*.db

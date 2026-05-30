@@ -7,8 +7,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
 
 from core.config import FRIDAY_MEMORY_MODEL, FRIDAY_MEMORY_TIMEOUT_SECONDS, OLLAMA_BASE_URL
-from core.memory.manager import memory_manager, MemoryHealthState
-from core.memory.pipeline import generate_embedding
+from core.memory.manager import MemoryHealthState, memory_manager
 
 logger = logging.getLogger("friday.agents.memory")
 
@@ -39,25 +38,28 @@ class MemoryAgent:
         Returns a narrative block and metadata (lineage), or None if confidence is too low.
         """
         # 1. Check Abstraction Boundary & Health
-        if memory_manager.health != MemoryHealthState.HEALTHY:
+        if memory_manager.health_state == MemoryHealthState.OFFLINE:
             logger.warning("[MEMORY AGENT] Cannot reconstruct context: Database Offline.")
             return None
             
         logger.info(f"[MEMORY AGENT] Initiating recall: Policy={policy.value}, Query='{query}'")
         
-        # 2. Vectorize Query
-        query_vector = await generate_embedding(query)
-        if not query_vector:
-            logger.warning("[MEMORY AGENT] Embedding generation failed. Aborting recall.")
-            return None
-            
-        # 3. Apply Policy Constraints
+        # 2. Apply Policy Constraints
         limit = 3 if policy == RetrievalPolicy.FAST_CONTEXT else 10
-        confidence_threshold = 0.85 if policy == RetrievalPolicy.FAST_CONTEXT else 0.70
+        confidence_threshold = {
+            RetrievalPolicy.FAST_CONTEXT: 0.85,
+            RetrievalPolicy.PROJECT_RECALL: 0.05,
+            RetrievalPolicy.DEEP_RESEARCH: 0.70,
+            RetrievalPolicy.DEBUG_RECONSTRUCTION: 0.05,
+            RetrievalPolicy.PERSONAL_CONTINUITY: 0.05,
+        }[policy]
         
-        # 4. Fetch Semantic Candidates (Raw nearest-neighbor dump)
-        # Note: We fetch more than the limit because we will apply heuristic filtering next.
-        raw_candidates = await memory_manager.retrieve_relevant_context(query_vector, limit=limit * 2)
+        # 3. Fetch semantic or keyword candidates from the memory backend.
+        raw_candidates = await memory_manager.retrieve_relevant_context(
+            query,
+            limit=limit * 2,
+            min_score=0.05,
+        )
         if not raw_candidates:
             logger.info("[MEMORY AGENT] Empty candidate pool.")
             return None
@@ -73,7 +75,13 @@ class MemoryAgent:
             logger.info("[MEMORY AGENT] All candidates failed confidence/isolation thresholds.")
             return None
             
-        final_candidates = ranked_candidates[:limit]
+        final_candidates = [
+            candidate for candidate in ranked_candidates
+            if candidate.get("score", 0.0) >= confidence_threshold
+        ][:limit]
+        if not final_candidates:
+            logger.info("[MEMORY AGENT] No candidates met confidence threshold.")
+            return None
         
         # 7. Recall Compression & Context Reconstruction
         reconstructed_block = await self._reconstruct_narrative(query, final_candidates)
@@ -88,6 +96,7 @@ class MemoryAgent:
             "lineage": {
                 "source_trace_ids": source_trace_ids,
                 "policy_used": policy.value,
+                "candidate_count": len(final_candidates),
             }
         }
 
@@ -101,7 +110,8 @@ class MemoryAgent:
         for cand in candidates:
             # Semantic Duplication Suppression
             # Simple heuristic: exact match of summary string (in production, we'd use fuzzy or vector distance of the summary)
-            summary_hash = cand.get("workflow_summary", "")[:50] 
+            summary_hash = cand.get("workflow_summary") or cand.get("summary", "")
+            summary_hash = summary_hash[:50]
             if summary_hash in seen_summaries:
                 continue
             seen_summaries.add(summary_hash)
@@ -141,6 +151,20 @@ class MemoryAgent:
             return narrative.strip()
         except asyncio.TimeoutError:
             logger.warning("[MEMORY AGENT] Reconstruction LLM timed out.")
-            return "[Memory Retrieval Failed: Timeout during synthesis]"
+            return self._deterministic_recall_summary(candidates, reason="reconstruction_timeout")
+        except Exception as exc:
+            logger.warning("[MEMORY AGENT] Reconstruction LLM failed: %s", exc)
+            return self._deterministic_recall_summary(candidates, reason=f"reconstruction_failed:{exc}")
+
+    def _deterministic_recall_summary(self, candidates: List[Dict], reason: str) -> str:
+        lines = [f"Relevant continuity found ({reason})."]
+        for index, candidate in enumerate(candidates[:5], start=1):
+            intent = candidate.get("intent") or "unknown"
+            summary = candidate.get("workflow_summary") or candidate.get("summary") or ""
+            summary = " ".join(str(summary).split())
+            if len(summary) > 500:
+                summary = summary[:497] + "..."
+            lines.append(f"{index}. {intent}: {summary}")
+        return "\n".join(lines)
 
 memory_agent = MemoryAgent()

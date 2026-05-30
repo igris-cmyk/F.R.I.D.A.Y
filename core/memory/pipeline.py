@@ -6,15 +6,13 @@ from typing import Dict, Any, Optional
 
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
-from langchain_ollama import OllamaEmbeddings
 
 from core.config import (
-    FRIDAY_EMBEDDING_MODEL,
     FRIDAY_MEMORY_MODEL,
     FRIDAY_MEMORY_TIMEOUT_SECONDS,
     OLLAMA_BASE_URL,
 )
-from core.memory.manager import memory_manager, MemoryHealthState, MemoryImportance
+from core.memory.manager import MemoryHealthState, memory_manager, MemoryImportance
 
 logger = logging.getLogger("friday.memory.pipeline")
 
@@ -24,13 +22,6 @@ compression_llm = OllamaLLM(
     base_url=OLLAMA_BASE_URL,
     temperature=0.1,
 )
-
-# Embedding Model (Must be verified before use)
-try:
-    embedding_llm = OllamaEmbeddings(model=FRIDAY_EMBEDDING_MODEL)
-except Exception as e:
-    embedding_llm = None
-    logger.warning(f"MemoryPipeline: Failed to initialize OllamaEmbeddings: {e}")
 
 async def score_relevance(normalized_trace: Dict[str, Any]) -> MemoryImportance:
     """
@@ -96,26 +87,29 @@ async def compress_workflow(normalized_trace: Dict[str, Any]) -> str:
         return summary.strip()
     except asyncio.TimeoutError:
         logger.warning("MemoryPipeline: Compression LLM timed out.")
-        return f"Timeout during summarization of intent: {normalized_trace.get('intent')}"
+        return _fallback_summary(normalized_trace, reason="compression_timeout")
+    except Exception as exc:
+        logger.warning("MemoryPipeline: Compression LLM failed: %s", exc)
+        return _fallback_summary(normalized_trace, reason=f"compression_failed:{exc}")
+
+
+def _fallback_summary(normalized_trace: Dict[str, Any], reason: str) -> str:
+    command = normalized_trace.get("command", "")
+    result = normalized_trace.get("result", "")
+    if len(result) > 1200:
+        result = result[:600] + "\n...[TRUNCATED]...\n" + result[-600:]
+    return (
+        f"Intent: {normalized_trace.get('intent', 'unknown')}. "
+        f"Command: {command}. "
+        f"Outcome summary generated deterministically because {reason}.\n"
+        f"Result preview:\n{result}"
+    ).strip()
 
 async def generate_embedding(text: str) -> Optional[list[float]]:
     """
     Validation Stage: Checks if embedding model is available and generates vector.
     """
-    if not embedding_llm:
-        logger.warning("MemoryPipeline: Embeddings unavailable. Skipping.")
-        return None
-        
-    try:
-        # Note: langchain-ollama embeddings usually use sync embed_query.
-        # For true async in production, we should wrap in run_in_executor.
-        # Or use aiohttp directly against the Ollama API.
-        loop = asyncio.get_event_loop()
-        vector = await loop.run_in_executor(None, embedding_llm.embed_query, text)
-        return vector
-    except Exception as e:
-        logger.warning(f"MemoryPipeline: Embedding generation failed: {e}")
-        return None
+    return await memory_manager.generate_embedding(text)
 
 async def process_completed_trace(trace_id: str, intent: str, command: str, result: str, error_state: bool, environment: Dict[str, Any], metadata: Dict[str, Any]):
     """
@@ -123,45 +117,69 @@ async def process_completed_trace(trace_id: str, intent: str, command: str, resu
     Runs strictly as a fire-and-forget background task.
     """
     start_time = time.time()
-    
-    # Stage 1: Trace Normalization
-    normalized_trace = {
-        "trace_id": trace_id,
-        "intent": intent,
-        "command": command,
-        "result": result,
-        "error_state": error_state
-    }
-    
-    # Stage 2: Relevance Scoring
-    importance = await score_relevance(normalized_trace)
-    if importance == MemoryImportance.TRANSIENT:
-        logger.info(f"[MEMORY PIPELINE] Trace {trace_id} -> REJECTED (Relevance: TRANSIENT)")
-        return
-        
-    logger.info(f"[MEMORY PIPELINE] Trace {trace_id} -> IMPORTANCE: {importance.value.upper()}")
-    
-    # Stage 3: Adaptive Degradation & Stage 4: Compression
-    # (If we were severely degraded, we could skip compression, but for now we proceed)
-    compression_start = time.time()
-    workflow_summary = await compress_workflow(normalized_trace)
-    compression_ms = int((time.time() - compression_start) * 1000)
-    
-    # Stage 5: Embedding Validation
-    embedding_start = time.time()
-    embedding_vector = await generate_embedding(workflow_summary)
-    embedding_ms = int((time.time() - embedding_start) * 1000) if embedding_vector else 0
-    
-    # Stage 6: Persistence to MemoryManager
-    await memory_manager.persist_episodic_trace(
-        trace_id=trace_id,
-        intent=intent,
-        importance=importance,
-        workflow_summary=workflow_summary,
-        environment_context=environment,
-        metadata={"compression_ms": compression_ms, "embedding_ms": embedding_ms, **metadata},
-        embedding=embedding_vector
-    )
-    
-    total_ms = int((time.time() - start_time) * 1000)
-    logger.info(f"[MEMORY PIPELINE] Trace {trace_id} -> PERSISTED (Total: {total_ms}ms, Comp: {compression_ms}ms, Embed: {embedding_ms}ms)")
+    logger.info("[MEMORY PIPELINE] Processing completed trace %s intent=%s command=%r", trace_id, intent, command)
+
+    try:
+        if memory_manager.health_state == MemoryHealthState.OFFLINE:
+            logger.info("[MEMORY PIPELINE] MemoryManager offline; initializing before persistence.")
+            await memory_manager.initialize()
+
+        normalized_trace = {
+            "trace_id": trace_id,
+            "intent": intent,
+            "command": command,
+            "result": result,
+            "error_state": error_state
+        }
+
+        importance = await score_relevance(normalized_trace)
+        if importance == MemoryImportance.TRANSIENT:
+            logger.info("[MEMORY PIPELINE] Skipped transient trace %s.", trace_id)
+            return {"persisted": False, "embedded": False, "degraded_reason": "transient", "memory_id": None}
+
+        logger.info("[MEMORY PIPELINE] Trace %s importance=%s", trace_id, importance.value.upper())
+
+        compression_start = time.time()
+        workflow_summary = await compress_workflow(normalized_trace)
+        compression_ms = int((time.time() - compression_start) * 1000)
+
+        embedding_start = time.time()
+        embedding_vector = await generate_embedding(workflow_summary)
+        embedding_ms = int((time.time() - embedding_start) * 1000) if embedding_vector else 0
+
+        persistence_result = await memory_manager.persist_episodic_trace(
+            trace_id=trace_id,
+            intent=intent,
+            importance=importance,
+            workflow_summary=workflow_summary,
+            environment_context=environment,
+            metadata={
+                "compression_ms": compression_ms,
+                "embedding_ms": embedding_ms,
+                "command": command,
+                "intent_type": intent,
+                "result_preview": result[:2000],
+                **metadata,
+            },
+            embedding=embedding_vector
+        )
+
+        total_ms = int((time.time() - start_time) * 1000)
+        if persistence_result.get("persisted"):
+            logger.info(
+                "[MEMORY PIPELINE] Persisted memory item trace=%s memory_id=%s embedded=%s total_ms=%s",
+                trace_id,
+                persistence_result.get("memory_id"),
+                persistence_result.get("embedded"),
+                total_ms,
+            )
+        else:
+            logger.warning(
+                "[MEMORY PIPELINE] Persistence failed: trace=%s reason=%s",
+                trace_id,
+                persistence_result.get("degraded_reason"),
+            )
+        return persistence_result
+    except Exception as exc:
+        logger.exception("[MEMORY PIPELINE] Persistence failed: trace=%s error=%s", trace_id, exc)
+        return {"persisted": False, "embedded": False, "degraded_reason": str(exc), "memory_id": None}
