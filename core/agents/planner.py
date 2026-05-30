@@ -443,7 +443,7 @@ class CognitivePlanner:
                     PlanStep(
                         capability_id="filesystem.search",
                         reason="Locate memory subsystem source files.",
-                        input={"pattern": "*.py", "root": "core/memory"},
+                        input={"pattern": "*.py", "root": "core"},
                     ),
                     PlanStep(
                         capability_id="research.synthesize",

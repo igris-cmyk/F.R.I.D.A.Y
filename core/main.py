@@ -37,6 +37,19 @@ from core.security.permissions import SecurityPolicy
 from core.security.approval import PendingApproval, matches_pending_approval
 from core.capabilities.executor import CapabilityExecutor
 from core.capabilities.contracts import CapabilityInvocation, CapabilityExecutionContext, CapabilityFailure
+from core.config import (
+    FRIDAY_RESEARCH_MAX_CHARS_PER_FILE,
+    FRIDAY_RESEARCH_MAX_FILES,
+    FRIDAY_RESEARCH_MAX_TOTAL_CHARS,
+)
+from core.research.context_builder import (
+    ContextBudget,
+    build_context_file,
+    context_budget_used,
+    context_has_truncation,
+    select_ranked_files,
+)
+from core.research.ranker import rank_research_files
 
 # Global Capability Engine
 registry = CapabilityRegistry()
@@ -54,9 +67,9 @@ logger = logging.getLogger("friday.core")
 ACTIVE_TRACES = {}
 PENDING_APPROVALS: Dict[str, PendingApproval] = {}
 
-WORKFLOW_MAX_FILES_TO_READ = 8
-WORKFLOW_MAX_CHARS_PER_FILE = 4000
-WORKFLOW_MAX_TOTAL_CONTEXT_CHARS = 20000
+WORKFLOW_MAX_FILES_TO_READ = FRIDAY_RESEARCH_MAX_FILES
+WORKFLOW_MAX_CHARS_PER_FILE = FRIDAY_RESEARCH_MAX_CHARS_PER_FILE
+WORKFLOW_MAX_TOTAL_CONTEXT_CHARS = FRIDAY_RESEARCH_MAX_TOTAL_CHARS
 WORKFLOW_EXCLUDED_DIRS = {
     ".git",
     ".venv",
@@ -69,18 +82,6 @@ WORKFLOW_EXCLUDED_DIRS = {
     ".mypy_cache",
     ".ruff_cache",
 }
-WORKFLOW_PRIORITY_PREFIXES = (
-    "core/main.py",
-    "core/agents/",
-    "core/capabilities/",
-    "core/security/",
-    "core/memory/",
-    "apps/desktop/src/",
-    "apps/desktop/src-tauri/src/",
-)
-WORKFLOW_SOURCE_EXTENSIONS = (".py", ".js", ".rs", ".toml", ".json", ".md")
-
-
 def create_workflow_context(trace_id: str, original_intent: str) -> Dict[str, Any]:
     return {
         "trace_id": trace_id,
@@ -100,19 +101,9 @@ def is_generated_or_dependency_path(path: str) -> bool:
 
 
 def select_files_for_synthesis(files: List[str], max_files: int = WORKFLOW_MAX_FILES_TO_READ) -> List[str]:
-    candidates = [
-        file_path for file_path in files
-        if not is_generated_or_dependency_path(file_path)
-        and file_path.endswith(WORKFLOW_SOURCE_EXTENSIONS)
-    ]
-
-    def priority_key(path: str) -> tuple[int, int, str]:
-        for index, prefix in enumerate(WORKFLOW_PRIORITY_PREFIXES):
-            if path == prefix or path.startswith(prefix):
-                return (0, index, path)
-        return (1, len(path), path)
-
-    return sorted(dict.fromkeys(candidates), key=priority_key)[:max_files]
+    budget = ContextBudget(max_files=max_files)
+    ranked_files = rank_research_files("", files)
+    return select_ranked_files(ranked_files, budget=budget)
 
 
 def add_file_to_workflow_context(
@@ -122,18 +113,21 @@ def add_file_to_workflow_context(
     size: int,
     truncated: bool,
 ) -> Optional[Dict[str, Any]]:
-    used_chars = sum(len(item["content"]) for item in workflow_context["files_read"])
-    remaining = WORKFLOW_MAX_TOTAL_CONTEXT_CHARS - used_chars
-    if remaining <= 0:
+    context_file = build_context_file(
+        path=path,
+        content=content,
+        size=size,
+        truncated=truncated,
+        used_chars=context_budget_used(workflow_context["files_read"]),
+        budget=ContextBudget(),
+    )
+    if not context_file:
         return None
-
-    char_limit = min(WORKFLOW_MAX_CHARS_PER_FILE, remaining)
-    bounded_content = content[:char_limit]
     file_record = {
-        "path": path,
-        "content": bounded_content,
-        "size": size,
-        "truncated": truncated or len(content) > len(bounded_content),
+        "path": context_file.path,
+        "content": context_file.content,
+        "size": context_file.size,
+        "truncated": context_file.truncated,
     }
     workflow_context["files_read"].append(file_record)
     workflow_context["synthesis_inputs"] = workflow_context["files_read"]
@@ -190,16 +184,42 @@ async def read_selected_files_for_workflow(
     capability_context: CapabilityExecutionContext,
     record: Optional[TraceRecord] = None,
 ) -> List[Dict[str, Any]]:
-    selected_files = select_files_for_synthesis(workflow_context["files_found"])
+    ranked_files = rank_research_files(
+        workflow_context["original_intent"],
+        workflow_context["files_found"],
+    )
+    selected_files = select_ranked_files(ranked_files, budget=ContextBudget())
+    workflow_context["metadata"]["ranked_files"] = [
+        {"path": item.path, "score": item.score, "reasons": item.reasons}
+        for item in ranked_files
+    ]
+    workflow_context["metadata"]["selected_files"] = selected_files
+
     if not selected_files:
         return []
 
     await publish_execution_update(
         nc,
         trace_id=trace_id,
-        source_component="core.workflow",
+        source_component="core.research",
         stage="planning",
-        message=f"[WORKFLOW] Selected {len(selected_files)} files for synthesis.",
+        message=f"[RESEARCH] Ranked {len(ranked_files)} files for intent relevance.",
+    )
+    if ranked_files:
+        top_file = ranked_files[0]
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.research",
+            stage="planning",
+            message=f"[RESEARCH] Top file: {top_file.path} score={top_file.score}",
+        )
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.research",
+        stage="planning",
+        message=f"[RESEARCH] Selected {len(selected_files)} files for grounded synthesis.",
     )
 
     bound_reads = []
@@ -233,6 +253,19 @@ async def read_selected_files_for_workflow(
             stage="capability_execution",
             message="[CAPABILITY] filesystem.read completed successfully.",
         )
+
+    budget_used = context_budget_used(workflow_context["files_read"])
+    truncation_note = " truncated=true" if context_has_truncation(workflow_context["files_read"]) else ""
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.research",
+        stage="planning",
+        message=(
+            f"[RESEARCH] Context budget: "
+            f"{budget_used}/{WORKFLOW_MAX_TOTAL_CONTEXT_CHARS} chars.{truncation_note}"
+        ),
+    )
 
     return bound_reads
 

@@ -215,6 +215,106 @@ class TestRuntimeFailures(unittest.IsolatedAsyncioTestCase):
                 "core/agents/planner.py",
             ])
 
+    async def test_workflow_uses_ranked_selected_files_not_first_eight(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            paths = [
+                "tests/test_noise.py",
+                "core/test_event_loop.py",
+                "core/verify_approval.py",
+                "core/memory/manager.py",
+                "core/memory/pipeline.py",
+                "core/memory/retriever.py",
+                "core/agents/memory_agent.py",
+                "core/main.py",
+            ]
+            for path in paths:
+                target = workspace / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"# {path}", encoding="utf-8")
+
+            workflow_context = create_workflow_context("trace-ranked", "explain memory subsystem")
+            capture_workflow_result(
+                workflow_context,
+                "filesystem.search",
+                {"files": paths, "count": len(paths)},
+            )
+
+            reads = await read_selected_files_for_workflow(
+                nc=FakeNATS(),
+                trace_id="trace-ranked",
+                executor=CapabilityExecutor(CapabilityRegistry(), SecurityPolicy()),
+                workflow_context=workflow_context,
+                capability_context=CapabilityExecutionContext(
+                    trace_id="trace-ranked",
+                    source_intent="explain memory subsystem",
+                    workspace_root=str(workspace),
+                ),
+                record=FakeRecord(),
+            )
+
+            self.assertEqual([item["path"] for item in reads], [
+                "core/memory/manager.py",
+                "core/memory/pipeline.py",
+                "core/memory/retriever.py",
+                "core/agents/memory_agent.py",
+            ])
+            self.assertEqual(workflow_context["metadata"]["selected_files"], [
+                "core/memory/manager.py",
+                "core/memory/pipeline.py",
+                "core/memory/retriever.py",
+                "core/agents/memory_agent.py",
+            ])
+
+    async def test_research_telemetry_is_emitted_during_binding(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            for path in (
+                "core/main.py",
+                "core/agents/planner.py",
+                "core/capabilities/executor.py",
+                "core/security/permissions.py",
+            ):
+                target = workspace / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("x" * 100, encoding="utf-8")
+
+            nc = FakeNATS()
+            workflow_context = create_workflow_context("trace-telemetry", "analyze repository architecture")
+            capture_workflow_result(
+                workflow_context,
+                "filesystem.search",
+                {
+                    "files": [
+                        "core/main.py",
+                        "core/agents/planner.py",
+                        "core/capabilities/executor.py",
+                        "core/security/permissions.py",
+                    ],
+                    "count": 4,
+                },
+            )
+
+            await read_selected_files_for_workflow(
+                nc=nc,
+                trace_id="trace-telemetry",
+                executor=CapabilityExecutor(CapabilityRegistry(), SecurityPolicy()),
+                workflow_context=workflow_context,
+                capability_context=CapabilityExecutionContext(
+                    trace_id="trace-telemetry",
+                    source_intent="analyze repository architecture",
+                    workspace_root=str(workspace),
+                ),
+                record=FakeRecord(),
+            )
+
+            events = [json.loads(payload.decode()) for _, payload in nc.published]
+            messages = [event["payload"]["message"] for event in events]
+            self.assertTrue(any(message.startswith("[RESEARCH] Ranked 4 files") for message in messages))
+            self.assertTrue(any(message.startswith("[RESEARCH] Top file: core/main.py") for message in messages))
+            self.assertIn("[RESEARCH] Selected 4 files for grounded synthesis.", messages)
+            self.assertTrue(any(message.startswith("[RESEARCH] Context budget: 400/12000 chars") for message in messages))
+
     async def test_research_synthesize_receives_prior_file_contents(self):
         workflow_context = create_workflow_context("trace-synth", "analyze repository architecture")
         capture_workflow_result(

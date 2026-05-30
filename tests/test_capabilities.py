@@ -49,6 +49,9 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config_module.FRIDAY_PLANNER_TIMEOUT_SECONDS, 6.0)
             self.assertEqual(config_module.FRIDAY_RESEARCH_TIMEOUT_SECONDS, 12.0)
             self.assertEqual(config_module.FRIDAY_MEMORY_TIMEOUT_SECONDS, 8.0)
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_FILES, 4)
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_CHARS_PER_FILE, 3500)
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_TOTAL_CHARS, 12000)
         self._reload_config()
 
     def test_default_planner_model_is_laptop_friendly(self):
@@ -119,6 +122,9 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             "FRIDAY_EMBEDDING_MODEL": "embedding:test",
             "FRIDAY_RESEARCH_TIMEOUT_SECONDS": "11.5",
             "FRIDAY_MEMORY_TIMEOUT_SECONDS": "7.5",
+            "FRIDAY_RESEARCH_MAX_FILES": "3",
+            "FRIDAY_RESEARCH_MAX_CHARS_PER_FILE": "1200",
+            "FRIDAY_RESEARCH_MAX_TOTAL_CHARS": "3000",
         }
         with patch.dict(os.environ, env, clear=True):
             config_module = self._reload_config()
@@ -129,6 +135,9 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config_module.FRIDAY_EMBEDDING_MODEL, "embedding:test")
             self.assertEqual(config_module.FRIDAY_RESEARCH_TIMEOUT_SECONDS, 11.5)
             self.assertEqual(config_module.FRIDAY_MEMORY_TIMEOUT_SECONDS, 7.5)
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_FILES, 3)
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_CHARS_PER_FILE, 1200)
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_TOTAL_CHARS, 3000)
         self._reload_config()
 
     def test_agent_llm_modules_do_not_hardcode_local_model_literals(self):
