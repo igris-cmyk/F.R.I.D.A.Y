@@ -68,7 +68,7 @@ class MemoryManager:
                         workflow_summary TEXT NOT NULL,
                         environment_context JSONB,
                         metadata JSONB,
-                        embedding vector(768) -- nomic-embed-text is 768 dims
+                        embedding vector(768)
                     );
                 """)
                 logger.info("MemoryManager: Schema verified.")

@@ -32,12 +32,31 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         importlib.reload(planner_module)
         return config_module, planner_module
 
+    def _reload_config(self):
+        import core.config as config_module
+
+        return importlib.reload(config_module)
+
+    def test_default_role_model_mapping_is_low_resource_friendly(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config_module = self._reload_config()
+            self.assertEqual(config_module.FRIDAY_PLANNER_MODEL, "qwen2.5:1.5b")
+            self.assertEqual(config_module.FRIDAY_ROUTER_MODEL, "qwen2.5:1.5b")
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MODEL, "qwen2.5:3b")
+            self.assertEqual(config_module.FRIDAY_MEMORY_MODEL, "qwen2.5:1.5b")
+            self.assertEqual(config_module.FRIDAY_CODE_MODEL, "qwen2.5-coder:1.5b")
+            self.assertEqual(config_module.FRIDAY_EMBEDDING_MODEL, "nomic-embed-text")
+            self.assertEqual(config_module.FRIDAY_PLANNER_TIMEOUT_SECONDS, 6.0)
+            self.assertEqual(config_module.FRIDAY_RESEARCH_TIMEOUT_SECONDS, 12.0)
+            self.assertEqual(config_module.FRIDAY_MEMORY_TIMEOUT_SECONDS, 8.0)
+        self._reload_config()
+
     def test_default_planner_model_is_laptop_friendly(self):
         with patch.dict(os.environ, {}, clear=True):
             config_module, planner_module = self._reload_config_and_planner()
             planner = planner_module.CognitivePlanner(registry=self.registry)
-            self.assertEqual(config_module.FRIDAY_PLANNER_MODEL, "qwen2.5:3b")
-            self.assertEqual(planner.model, "qwen2.5:3b")
+            self.assertEqual(config_module.FRIDAY_PLANNER_MODEL, "qwen2.5:1.5b")
+            self.assertEqual(planner.model, "qwen2.5:1.5b")
         self._reload_config_and_planner()
 
     def test_default_planner_timeout_is_laptop_friendly(self):
@@ -91,16 +110,47 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(planner.model, "qwen2.5:primary")
         self._reload_config_and_planner()
 
-    def test_agent_llm_modules_do_not_hardcode_old_model(self):
+    def test_role_model_env_overrides_are_applied(self):
+        env = {
+            "FRIDAY_ROUTER_MODEL": "router:test",
+            "FRIDAY_RESEARCH_MODEL": "research:test",
+            "FRIDAY_MEMORY_MODEL": "memory:test",
+            "FRIDAY_CODE_MODEL": "code:test",
+            "FRIDAY_EMBEDDING_MODEL": "embedding:test",
+            "FRIDAY_RESEARCH_TIMEOUT_SECONDS": "11.5",
+            "FRIDAY_MEMORY_TIMEOUT_SECONDS": "7.5",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config_module = self._reload_config()
+            self.assertEqual(config_module.FRIDAY_ROUTER_MODEL, "router:test")
+            self.assertEqual(config_module.FRIDAY_RESEARCH_MODEL, "research:test")
+            self.assertEqual(config_module.FRIDAY_MEMORY_MODEL, "memory:test")
+            self.assertEqual(config_module.FRIDAY_CODE_MODEL, "code:test")
+            self.assertEqual(config_module.FRIDAY_EMBEDDING_MODEL, "embedding:test")
+            self.assertEqual(config_module.FRIDAY_RESEARCH_TIMEOUT_SECONDS, 11.5)
+            self.assertEqual(config_module.FRIDAY_MEMORY_TIMEOUT_SECONDS, 7.5)
+        self._reload_config()
+
+    def test_agent_llm_modules_do_not_hardcode_local_model_literals(self):
         checked_files = [
             PROJECT_ROOT / "core" / "agents" / "router.py",
             PROJECT_ROOT / "core" / "agents" / "research.py",
             PROJECT_ROOT / "core" / "agents" / "memory_agent.py",
             PROJECT_ROOT / "core" / "agents" / "planner.py",
             PROJECT_ROOT / "core" / "memory" / "pipeline.py",
+            PROJECT_ROOT / "core" / "capabilities" / "executor.py",
+        ]
+        disallowed_literals = [
+            "qwen2.5:7b",
+            "qwen2.5:3b",
+            "qwen2.5:1.5b",
+            "qwen2.5-coder:1.5b",
+            "nomic-embed-text",
         ]
         for path in checked_files:
-            self.assertNotIn("qwen2.5:7b", path.read_text(encoding="utf-8"))
+            content = path.read_text(encoding="utf-8")
+            for literal in disallowed_literals:
+                self.assertNotIn(literal, content)
 
     async def test_planner_output(self):
         plan = await self.planner.generate_plan("summarize python files")
@@ -108,6 +158,44 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.steps[0].capability_id, "filesystem.search")
         self.assertEqual(plan.estimated_risk, "LOW")
         self.assertTrue(plan.validation.valid)
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
+
+    async def test_known_operational_prompts_skip_llm(self):
+        for command, capability_id in (
+            ("show git status", "git.status"),
+            ("find python files", "filesystem.search"),
+            ("read apps/desktop/package.json", "filesystem.read"),
+        ):
+            self.planner._generate_llm_plan.reset_mock()
+            plan = await self.planner.generate_plan(command)
+            self.assertEqual(plan.steps[0].capability_id, capability_id)
+            self.assertEqual(plan.validation.source, "deterministic")
+            self.assertFalse(plan.validation.fallback_used)
+            self.planner._generate_llm_plan.assert_not_awaited()
+
+    async def test_known_research_prompts_skip_llm(self):
+        for command in (
+            "analyze repository architecture",
+            "explain memory subsystem",
+            "show approval workflow",
+        ):
+            self.planner._generate_llm_plan.reset_mock()
+            plan = await self.planner.generate_plan(command)
+            self.assertEqual(plan.steps[-1].capability_id, "research.synthesize")
+            self.assertEqual(plan.validation.source, "deterministic")
+            self.assertFalse(plan.validation.fallback_used)
+            self.planner._generate_llm_plan.assert_not_awaited()
+
+    async def test_ambiguous_prompt_still_attempts_llm_planner(self):
+        planner = CognitivePlanner(registry=self.registry)
+        planner._generate_llm_plan = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
+        planner._generate_llm_plan.assert_awaited_once()
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertTrue(plan.validation.fallback_used)
+        self.assertEqual(plan.validation.fallback_reason, "timeout")
 
     async def test_git_status_routes_to_capability(self):
         router_state = await classify_intent({
@@ -123,6 +211,8 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         plan = await self.planner.generate_plan("show git status")
         self.assertEqual(len(plan.steps), 1)
         self.assertEqual(plan.steps[0].capability_id, "git.status")
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
 
     async def test_find_python_files_routes_to_filesystem_search(self):
         router_state = await classify_intent({
@@ -138,6 +228,8 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         plan = await self.planner.generate_plan("find python files")
         self.assertEqual(len(plan.steps), 1)
         self.assertEqual(plan.steps[0].capability_id, "filesystem.search")
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
 
     async def test_read_package_json_routes_to_filesystem_read(self):
         router_state = await classify_intent({
@@ -153,12 +245,16 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         plan = await self.planner.generate_plan("read package.json")
         self.assertEqual(len(plan.steps), 1)
         self.assertEqual(plan.steps[0].capability_id, "filesystem.read")
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
 
     async def test_read_nested_package_json_routes_to_filesystem_read(self):
         plan = await self.planner.generate_plan("read apps/desktop/package.json")
         self.assertEqual(len(plan.steps), 1)
         self.assertEqual(plan.steps[0].capability_id, "filesystem.read")
         self.assertEqual(plan.steps[0].input["path"], "apps/desktop/package.json")
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
 
     async def test_hello_routes_to_conversation(self):
         router_state = await classify_intent({
@@ -197,9 +293,13 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(router_state["intent"], "terminal")
 
+        self.planner._generate_llm_plan.reset_mock()
         plan = await self.planner.generate_plan("delete everything in this folder")
         self.assertEqual(plan.steps[0].capability_id, "shell.execute")
         self.assertEqual(plan.estimated_risk, "CRITICAL")
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
+        self.planner._generate_llm_plan.assert_not_awaited()
 
     async def test_remove_all_files_is_denied(self):
         router_state = await classify_intent({
@@ -278,6 +378,8 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         plan = await self.planner.generate_plan("system monitor")
         self.assertEqual(len(plan.steps), 1)
         self.assertEqual(plan.steps[0].capability_id, "system.monitor")
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
 
     async def test_research_requests_generate_multi_step_plans(self):
         for command in (
@@ -288,13 +390,17 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             plan = await self.planner.generate_plan(command)
             self.assertGreaterEqual(len(plan.steps), 2)
             self.assertEqual(plan.steps[-1].capability_id, "research.synthesize")
+            self.assertEqual(plan.validation.source, "deterministic")
+            self.assertFalse(plan.validation.fallback_used)
 
     async def test_planner_critical_intent(self):
+        self.planner._generate_llm_plan.reset_mock()
         plan = await self.planner.generate_plan("delete everything")
         self.assertEqual(len(plan.steps), 1)
         self.assertEqual(plan.steps[0].capability_id, "shell.execute")
         self.assertEqual(plan.estimated_risk, "CRITICAL")
         self.assertTrue(plan.requires_confirmation)
+        self.planner._generate_llm_plan.assert_not_awaited()
 
     async def test_shell_execute_remains_disabled_or_gated(self):
         inv = CapabilityInvocation(
@@ -310,12 +416,13 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         planner = CognitivePlanner(registry=self.registry)
         planner._generate_llm_plan = AsyncMock(side_effect=ValueError("LLM returned invalid JSON"))
 
-        plan = await planner.generate_plan("show git status")
-        self.assertEqual(plan.steps[0].capability_id, "git.status")
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
+        self.assertEqual(plan.steps[0].capability_id, "system.monitor")
         self.assertEqual(plan.validation.source, "deterministic")
         self.assertTrue(plan.validation.fallback_used)
         self.assertEqual(plan.validation.fallback_reason, "invalid_json")
         self.assertIn("invalid JSON", plan.validation.errors[0])
+        planner._generate_llm_plan.assert_awaited_once()
 
     async def test_planner_unknown_capability_falls_back(self):
         planner = CognitivePlanner(registry=self.registry)
@@ -323,22 +430,24 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             '{"steps":[{"capability_id":"unknown.capability","reason":"bad","input":{}}],"estimated_risk":"LOW","requires_confirmation":false}'
         ))
 
-        plan = await planner.generate_plan("show git status")
-        self.assertEqual(plan.steps[0].capability_id, "git.status")
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
+        self.assertEqual(plan.steps[0].capability_id, "system.monitor")
         self.assertEqual(plan.validation.source, "deterministic")
         self.assertTrue(plan.validation.fallback_used)
         self.assertEqual(plan.validation.fallback_reason, "unknown_capability")
         self.assertIn("Unknown capability", plan.validation.errors[0])
+        planner._generate_llm_plan.assert_awaited_once()
 
     async def test_planner_timeout_falls_back(self):
         planner = CognitivePlanner(registry=self.registry)
         planner._generate_llm_plan = AsyncMock(side_effect=asyncio.TimeoutError())
 
-        plan = await planner.generate_plan("find python files")
-        self.assertEqual(plan.steps[0].capability_id, "filesystem.search")
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
+        self.assertEqual(plan.steps[0].capability_id, "system.monitor")
         self.assertEqual(plan.validation.source, "deterministic")
         self.assertTrue(plan.validation.fallback_used)
         self.assertEqual(plan.validation.fallback_reason, "timeout")
+        planner._generate_llm_plan.assert_awaited_once()
 
     async def test_planner_missing_required_input_falls_back(self):
         planner = CognitivePlanner(registry=self.registry)
@@ -346,14 +455,15 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             '{"steps":[{"capability_id":"filesystem.search","reason":"bad","input":{}}],"estimated_risk":"SAFE","requires_confirmation":false}'
         ))
 
-        plan = await planner.generate_plan("find python files")
-        self.assertEqual(plan.steps[0].capability_id, "filesystem.search")
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
+        self.assertEqual(plan.steps[0].capability_id, "system.monitor")
         self.assertEqual(plan.validation.source, "deterministic")
         self.assertTrue(plan.validation.fallback_used)
         self.assertEqual(plan.validation.fallback_reason, "missing_required_input")
+        planner._generate_llm_plan.assert_awaited_once()
 
     async def test_planner_fallback_reason_is_exposed(self):
-        plan = await self.planner.generate_plan("show git status")
+        plan = await self.planner.generate_plan("coordinate a nuanced multi step repository investigation")
         self.assertTrue(plan.validation.fallback_used)
         self.assertEqual(plan.validation.fallback_reason, "timeout")
         self.assertTrue(plan.validation.errors)
@@ -364,8 +474,8 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             "models": [{"name": "qwen2.5:other", "model": "qwen2.5:other"}]
         }
 
-        plan = await planner.generate_plan("show git status")
-        self.assertEqual(plan.steps[0].capability_id, "git.status")
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
+        self.assertEqual(plan.steps[0].capability_id, "system.monitor")
         self.assertEqual(plan.validation.source, "deterministic")
         self.assertTrue(plan.validation.fallback_used)
         self.assertEqual(plan.validation.fallback_reason, "ollama_unavailable")
@@ -382,11 +492,12 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             '"estimated_risk":"LOW","requires_confirmation":false}'
         ))
 
-        plan = await planner.generate_plan("show git status")
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
         self.assertEqual(plan.validation.source, "llm")
         self.assertFalse(plan.validation.fallback_used)
         self.assertIsNone(plan.validation.fallback_reason)
         self.assertEqual(plan.steps[0].capability_id, "git.status")
+        planner._invoke_llm.assert_awaited_once()
 
     async def test_unknown_capability_rejection(self):
         inv = CapabilityInvocation(

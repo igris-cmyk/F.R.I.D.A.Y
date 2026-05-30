@@ -11,7 +11,11 @@ from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
 from core.capabilities.contracts import CapabilityInvocation, CapabilityResult, CapabilityFailure, CapabilityRequiresApproval
 from core.capabilities.registry import CapabilityRegistry
-from core.config import FRIDAY_RESEARCH_MODEL, OLLAMA_BASE_URL
+from core.config import (
+    FRIDAY_RESEARCH_MODEL,
+    FRIDAY_RESEARCH_TIMEOUT_SECONDS,
+    OLLAMA_BASE_URL,
+)
 from core.security.permissions import SecurityPolicy, RiskLevel
 
 class CapabilityExecutor:
@@ -33,7 +37,7 @@ class CapabilityExecutor:
     SYNTHESIS_MAX_FILES = 8
     SYNTHESIS_MAX_CHARS_PER_FILE = 4000
     SYNTHESIS_MAX_TOTAL_CHARS = 20000
-    SYNTHESIS_LLM_TIMEOUT_SECONDS = 8.0
+    SYNTHESIS_LLM_TIMEOUT_SECONDS = FRIDAY_RESEARCH_TIMEOUT_SECONDS
     
     def __init__(self, registry: CapabilityRegistry, security_policy: SecurityPolicy):
         self.registry = registry

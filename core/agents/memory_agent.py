@@ -6,7 +6,7 @@ from enum import Enum
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
 
-from core.config import FRIDAY_MEMORY_MODEL, OLLAMA_BASE_URL
+from core.config import FRIDAY_MEMORY_MODEL, FRIDAY_MEMORY_TIMEOUT_SECONDS, OLLAMA_BASE_URL
 from core.memory.manager import memory_manager, MemoryHealthState
 from core.memory.pipeline import generate_embedding
 
@@ -136,7 +136,7 @@ class MemoryAgent:
         try:
             narrative = await asyncio.wait_for(
                 chain.ainvoke({"query": query, "context_dump": context_dump}),
-                timeout=8.0
+                timeout=FRIDAY_MEMORY_TIMEOUT_SECONDS
             )
             return narrative.strip()
         except asyncio.TimeoutError:

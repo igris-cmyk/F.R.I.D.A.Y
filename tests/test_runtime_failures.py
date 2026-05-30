@@ -49,6 +49,22 @@ class SlowPlanner:
         )
 
 
+class HighConfidencePlanner:
+    model = "qwen2.5:test"
+    timeout_seconds = 6.0
+
+    def generate_high_confidence_plan(self, intent):
+        return Plan(
+            steps=[PlanStep(capability_id="git.status", reason="Inspect repository.", input={"directory": "."})],
+            estimated_risk="LOW",
+            requires_confirmation=False,
+            validation=PlanValidation(valid=True, source="deterministic", fallback_used=False),
+        )
+
+    async def generate_plan(self, intent):
+        raise AssertionError("LLM planner path should not run for high-confidence plans.")
+
+
 class TimeoutFallbackPlanner:
     async def generate_plan(self, intent):
         await asyncio.sleep(2.1)
@@ -103,9 +119,34 @@ class TestRuntimeFailures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.validation.source, "llm")
         events = [json.loads(payload.decode()) for _, payload in nc.published]
         messages = [event["payload"]["message"] for event in events]
-        self.assertIn("[PLANNER] Local model planning started...", messages)
+        self.assertTrue(any(message.startswith("[PLANNER] Local model planning started...") for message in messages))
+        self.assertTrue(any("model=unknown" in message and "timeout=unknown" in message for message in messages))
         self.assertIn("[PLANNER] Waiting for local model...", messages)
         self.assertIn("planning_wait", record.stages)
+
+    async def test_run_planner_with_progress_uses_deterministic_high_confidence_plan(self):
+        nc = FakeNATS()
+        record = FakeRecord()
+
+        plan = await run_planner_with_progress(
+            nc=nc,
+            trace_id="trace-det",
+            planner=HighConfidencePlanner(),
+            intent="show git status",
+            record=record,
+            heartbeat_interval_seconds=0.5,
+        )
+
+        self.assertEqual(plan.validation.source, "deterministic")
+        self.assertFalse(plan.validation.fallback_used)
+        events = [json.loads(payload.decode()) for _, payload in nc.published]
+        messages = [event["payload"]["message"] for event in events]
+        self.assertIn(
+            "[PLANNER] Using deterministic high-confidence plan. source=deterministic model=qwen2.5:test timeout=6.0",
+            messages,
+        )
+        self.assertNotIn("[PLANNER] Waiting for local model...", messages)
+        self.assertIn("planning_deterministic", record.stages)
 
     async def test_run_planner_with_progress_emits_timeout_fallback_update(self):
         nc = FakeNATS()

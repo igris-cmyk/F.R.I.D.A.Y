@@ -8,7 +8,12 @@ from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
 from langchain_ollama import OllamaEmbeddings
 
-from core.config import FRIDAY_MEMORY_MODEL, OLLAMA_BASE_URL
+from core.config import (
+    FRIDAY_EMBEDDING_MODEL,
+    FRIDAY_MEMORY_MODEL,
+    FRIDAY_MEMORY_TIMEOUT_SECONDS,
+    OLLAMA_BASE_URL,
+)
 from core.memory.manager import memory_manager, MemoryHealthState, MemoryImportance
 
 logger = logging.getLogger("friday.memory.pipeline")
@@ -22,7 +27,7 @@ compression_llm = OllamaLLM(
 
 # Embedding Model (Must be verified before use)
 try:
-    embedding_llm = OllamaEmbeddings(model="nomic-embed-text")
+    embedding_llm = OllamaEmbeddings(model=FRIDAY_EMBEDDING_MODEL)
 except Exception as e:
     embedding_llm = None
     logger.warning(f"MemoryPipeline: Failed to initialize OllamaEmbeddings: {e}")
@@ -86,7 +91,7 @@ async def compress_workflow(normalized_trace: Dict[str, Any]) -> str:
                 "command": normalized_trace.get("command"),
                 "result_summary": result_str
             }),
-            timeout=5.0
+            timeout=FRIDAY_MEMORY_TIMEOUT_SECONDS
         )
         return summary.strip()
     except asyncio.TimeoutError:

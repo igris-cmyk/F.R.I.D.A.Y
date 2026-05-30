@@ -264,12 +264,38 @@ async def run_planner_with_progress(
     record: Optional[TraceRecord] = None,
     heartbeat_interval_seconds: float = 2.0,
 ):
+    model_name = getattr(planner, "model", "unknown")
+    timeout_seconds = getattr(planner, "timeout_seconds", "unknown")
+    generate_high_confidence_plan = getattr(planner, "generate_high_confidence_plan", None)
+    deterministic_plan = (
+        generate_high_confidence_plan(intent)
+        if callable(generate_high_confidence_plan)
+        else None
+    )
+    if deterministic_plan:
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.planner",
+            stage="planning",
+            message=(
+                "[PLANNER] Using deterministic high-confidence plan. "
+                f"source=deterministic model={model_name} timeout={timeout_seconds}"
+            ),
+        )
+        if record:
+            record.bump_heartbeat("planning_deterministic")
+        return deterministic_plan
+
     await publish_execution_update(
         nc,
         trace_id=trace_id,
         source_component="core.planner",
         stage="planning",
-        message="[PLANNER] Local model planning started...",
+        message=(
+            "[PLANNER] Local model planning started... "
+            f"model={model_name} timeout={timeout_seconds}"
+        ),
     )
     if record:
         record.bump_heartbeat("planning_start")
@@ -514,6 +540,7 @@ async def main():
                             message=(
                                 f"[PLANNER] Plan validated... "
                                 f"steps={len(plan.steps)} risk={plan.estimated_risk} "
+                                f"model={planner.model} timeout={planner.timeout_seconds} "
                                 f"source={plan.validation.source} fallback={plan.validation.fallback_used} "
                                 f"fallback_reason={plan.validation.fallback_reason or 'none'}"
                             )

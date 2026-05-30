@@ -116,6 +116,11 @@ class CognitivePlanner:
         )
 
     async def generate_plan(self, intent: str, context: Optional[str] = None) -> Plan:
+        deterministic_plan = self.generate_high_confidence_plan(intent=intent, context=context)
+        if deterministic_plan:
+            logger.info("Planner using deterministic high-confidence plan for intent: %s", intent)
+            return deterministic_plan
+
         try:
             llm_plan = await self._generate_llm_plan(intent=intent, context=context)
             return self._finalize_plan(llm_plan, source="llm", fallback_used=False)
@@ -134,6 +139,12 @@ class CognitivePlanner:
                 fallback_reason=reason,
                 fallback_errors=[message],
             )
+
+    def generate_high_confidence_plan(self, intent: str, context: Optional[str] = None) -> Optional[Plan]:
+        plan = self._generate_high_confidence_deterministic_plan(intent=intent, context=context)
+        if not plan:
+            return None
+        return self._finalize_plan(plan, source="deterministic", fallback_used=False)
 
     async def _generate_llm_plan(self, intent: str, context: Optional[str]) -> Plan:
         await self._verify_ollama_ready()
@@ -297,6 +308,23 @@ class CognitivePlanner:
         return "exception", message
 
     def _generate_deterministic_plan(self, intent: str, context: Optional[str] = None) -> Plan:
+        high_confidence_plan = self._generate_high_confidence_deterministic_plan(intent=intent, context=context)
+        if high_confidence_plan:
+            return high_confidence_plan
+
+        return Plan(
+            steps=[
+                PlanStep(
+                    capability_id="system.monitor",
+                    reason="Check system status.",
+                    input={},
+                )
+            ],
+            estimated_risk="LOW",
+            requires_confirmation=False,
+        )
+
+    def _generate_high_confidence_deterministic_plan(self, intent: str, context: Optional[str] = None) -> Optional[Plan]:
         normalized_intent = intent.lower().strip()
         tokens = normalized_intent.split()
 
@@ -427,14 +455,4 @@ class CognitivePlanner:
                 requires_confirmation=False,
             )
 
-        return Plan(
-            steps=[
-                PlanStep(
-                    capability_id="system.monitor",
-                    reason="Check system status.",
-                    input={},
-                )
-            ],
-            estimated_risk="LOW",
-            requires_confirmation=False,
-        )
+        return None
