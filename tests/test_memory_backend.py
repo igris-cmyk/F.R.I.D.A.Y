@@ -13,7 +13,7 @@ from core.memory import pipeline as memory_pipeline
 from core.memory.redaction import redact_text
 from core.memory.summarizer import summarize_completed_trace
 from core.memory.sqlite_store import SQLiteMemoryStore
-from core.tools.memory_debug import compact_memory_row
+from core.tools.memory_debug import compact_memory_row, parse_policy
 
 
 class TestSQLiteMemoryBackend(unittest.IsolatedAsyncioTestCase):
@@ -108,6 +108,35 @@ class TestSQLiteMemoryBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["trace_id"], "trace-memory")
 
+    async def test_repository_architecture_memory_found_when_embedded_count_zero(self):
+        self.manager.embedding_available = True
+        self.manager.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        await self.manager.persist_episodic_trace(
+            trace_id="trace-architecture",
+            intent="research",
+            importance=MemoryImportance.SEMANTIC,
+            workflow_summary="We inspected the repository architecture and orchestrator flow.",
+            environment_context={},
+            metadata={
+                "command": "analyze repository architecture",
+                "title": "Repository architecture inspection",
+                "key_files": ["core/main.py", "core/agents/planner.py"],
+            },
+        )
+        row = self.manager.store.list_memories()[0]
+        row["embedding_json"] = None
+        self.manager.store.insert_memory(row)
+
+        retrieval = await self.manager.retrieve_relevant_context_with_diagnostics(
+            "repository architecture",
+            limit=5,
+            min_score=0.05,
+        )
+
+        self.assertEqual(retrieval["results"][0]["trace_id"], "trace-architecture")
+        self.assertEqual(retrieval["diagnostics"]["embedded_count"], 0)
+        self.assertEqual(retrieval["diagnostics"]["retrieval_mode"], "keyword_fallback")
+
     async def test_cosine_similarity_ranks_relevant_memory_higher(self):
         await self.manager.persist_episodic_trace(
             trace_id="trace-memory",
@@ -183,6 +212,34 @@ class TestSQLiteMemoryBackend(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["embedded"])
         health = await self.manager.health()
         self.assertEqual(health["embedded_count"], 1)
+
+    async def test_embedding_timeout_falls_back_to_keyword_retrieval(self):
+        self.manager.embedding_available = True
+        self.manager.generate_embedding = AsyncMock(return_value=None)
+        await self.manager.persist_episodic_trace(
+            trace_id="trace-fallback",
+            intent="research",
+            importance=MemoryImportance.SEMANTIC,
+            workflow_summary="We inspected the memory subsystem and repository architecture.",
+            environment_context={},
+            metadata={
+                "command": "explain memory subsystem",
+                "title": "Memory subsystem inspection",
+                "key_files": ["core/memory/manager.py"],
+            },
+            embedding=[0.9, 0.1],
+        )
+
+        retrieval = await self.manager.retrieve_relevant_context_with_diagnostics(
+            "memory subsystem",
+            limit=5,
+            min_score=0.05,
+        )
+
+        self.assertEqual(retrieval["results"][0]["trace_id"], "trace-fallback")
+        self.assertEqual(retrieval["diagnostics"]["retrieval_mode"], "keyword_fallback")
+        self.assertTrue(retrieval["diagnostics"]["embedding_attempted"])
+        self.assertTrue(retrieval["diagnostics"]["embedding_failed"])
 
     async def test_empty_db_returns_no_relevant_memory(self):
         results = await self.manager.retrieve_relevant_context("planner timeout")
@@ -583,6 +640,78 @@ class TestMemoryAgentBackend(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reconstruction_timeout", output)
         self.assertNotIn("SUCCESS filesystem.search", output)
 
+    async def test_search_candidates_matches_project_recall_retrieval(self):
+        agent = MemoryAgent()
+        import core.agents.memory_agent as memory_agent_module
+
+        old_manager = memory_agent_module.memory_manager
+        try:
+            manager = MemoryManager(db_path=str(Path(tempfile.mkdtemp()) / "search.sqlite3"))
+            manager._check_embedding_model_available = AsyncMock(return_value=False)
+            await manager.initialize()
+            await manager.persist_episodic_trace(
+                trace_id="trace-search",
+                intent="research",
+                importance=MemoryImportance.SEMANTIC,
+                workflow_summary="We inspected the memory subsystem and repository architecture.",
+                environment_context={},
+                metadata={
+                    "command": "explain memory subsystem",
+                    "title": "Memory subsystem inspection",
+                    "key_files": ["core/memory/manager.py", "core/memory/pipeline.py"],
+                },
+            )
+            memory_agent_module.memory_manager = manager
+
+            recall = await agent.recall_context(
+                "what did we just inspect about memory?",
+                RetrievalPolicy.PROJECT_RECALL,
+            )
+            search = await agent.search_candidates(
+                "memory subsystem",
+                RetrievalPolicy.PROJECT_RECALL,
+            )
+        finally:
+            memory_agent_module.memory_manager = old_manager
+
+        self.assertIsNotNone(recall)
+        self.assertEqual(len(search["candidates"]), 1)
+        self.assertEqual(search["candidates"][0]["trace_id"], "trace-search")
+        self.assertEqual(search["diagnostics"]["policy"], RetrievalPolicy.PROJECT_RECALL.value)
+        self.assertEqual(search["diagnostics"]["retrieval_mode"], "keyword_fallback")
+
+    async def test_search_candidates_reports_hybrid_fallback_when_embedding_yields_no_matches(self):
+        agent = MemoryAgent()
+        import core.agents.memory_agent as memory_agent_module
+
+        old_manager = memory_agent_module.memory_manager
+        try:
+            manager = MemoryManager(db_path=str(Path(tempfile.mkdtemp()) / "hybrid.sqlite3"))
+            manager._check_embedding_model_available = AsyncMock(return_value=True)
+            await manager.initialize()
+            manager.embedding_available = True
+            manager.generate_embedding = AsyncMock(return_value=[1.0, 0.0])
+            await manager.persist_episodic_trace(
+                trace_id="trace-hybrid",
+                intent="research",
+                importance=MemoryImportance.SEMANTIC,
+                workflow_summary="We inspected the repository architecture.",
+                environment_context={},
+                metadata={
+                    "command": "analyze repository architecture",
+                    "title": "Repository architecture inspection",
+                    "key_files": ["core/main.py"],
+                },
+                embedding=[0.0, 1.0],
+            )
+            memory_agent_module.memory_manager = manager
+            result = await agent.search_candidates("repository architecture", RetrievalPolicy.PROJECT_RECALL)
+        finally:
+            memory_agent_module.memory_manager = old_manager
+
+        self.assertEqual(result["candidates"][0]["trace_id"], "trace-hybrid")
+        self.assertEqual(result["diagnostics"]["retrieval_mode"], "hybrid_fallback")
+
     async def test_respects_confidence_threshold(self):
         agent = MemoryAgent()
         import core.agents.memory_agent as memory_agent_module
@@ -606,6 +735,23 @@ class TestMemoryAgentBackend(unittest.IsolatedAsyncioTestCase):
             memory_agent_module.memory_manager = old_manager
 
         self.assertIsNone(result)
+
+    async def test_search_candidates_empty_db_returns_empty_list(self):
+        agent = MemoryAgent()
+        import core.agents.memory_agent as memory_agent_module
+
+        old_manager = memory_agent_module.memory_manager
+        try:
+            manager = MemoryManager(db_path=str(Path(tempfile.mkdtemp()) / "empty-search.sqlite3"))
+            manager._check_embedding_model_available = AsyncMock(return_value=False)
+            await manager.initialize()
+            memory_agent_module.memory_manager = manager
+            result = await agent.search_candidates("memory subsystem", RetrievalPolicy.PROJECT_RECALL)
+        finally:
+            memory_agent_module.memory_manager = old_manager
+
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["diagnostics"]["item_count"], 0)
 
 
 class TestCompletedTracePersistence(unittest.IsolatedAsyncioTestCase):
@@ -795,6 +941,9 @@ class TestMemoryDebugFormatting(unittest.TestCase):
 
         self.assertIn("metadata", compact)
         self.assertIn("content_preview", compact)
+
+    def test_parse_policy_accepts_default_alias(self):
+        self.assertEqual(parse_policy("default"), RetrievalPolicy.PROJECT_RECALL)
 
 
 if __name__ == "__main__":

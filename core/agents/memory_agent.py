@@ -31,6 +31,72 @@ class MemoryAgent:
             base_url=OLLAMA_BASE_URL,
             temperature=0.0,
         )
+
+    def policy_settings(self, policy: RetrievalPolicy) -> Dict[str, float | int]:
+        return {
+            "limit": 3 if policy == RetrievalPolicy.FAST_CONTEXT else 10,
+            "confidence_threshold": {
+                RetrievalPolicy.FAST_CONTEXT: 0.85,
+                RetrievalPolicy.PROJECT_RECALL: 0.05,
+                RetrievalPolicy.DEEP_RESEARCH: 0.70,
+                RetrievalPolicy.DEBUG_RECONSTRUCTION: 0.05,
+                RetrievalPolicy.PERSONAL_CONTINUITY: 0.05,
+            }[policy],
+            "raw_min_score": 0.05,
+        }
+
+    async def search_candidates(
+        self,
+        query: str,
+        policy: RetrievalPolicy,
+        current_workspace: str = None,
+    ) -> Dict[str, Any]:
+        if memory_manager.health_state == MemoryHealthState.OFFLINE:
+            logger.warning("[MEMORY AGENT] Cannot search memory: Database Offline.")
+            return {
+                "candidates": [],
+                "diagnostics": {
+                    "policy": policy.value,
+                    "item_count": 0,
+                    "embedding_available": memory_manager.embedding_available,
+                    "retrieval_mode": "offline",
+                    "confidence_threshold": self.policy_settings(policy)["confidence_threshold"],
+                    "raw_min_score": self.policy_settings(policy)["raw_min_score"],
+                },
+            }
+
+        settings = self.policy_settings(policy)
+        limit = int(settings["limit"])
+        confidence_threshold = float(settings["confidence_threshold"])
+        raw_min_score = float(settings["raw_min_score"])
+
+        retrieval = await memory_manager.retrieve_relevant_context_with_diagnostics(
+            query,
+            limit=limit * 2,
+            min_score=raw_min_score,
+        )
+        raw_candidates = retrieval["results"]
+        ranked_candidates = self._apply_ranking_heuristics(raw_candidates, current_workspace)
+        final_candidates = [
+            candidate for candidate in ranked_candidates
+            if candidate.get("score", 0.0) >= confidence_threshold
+        ][:limit]
+        manager_diagnostics = retrieval["diagnostics"]
+        diagnostics = {
+            "policy": policy.value,
+            "item_count": int(manager_diagnostics.get("item_count", 0)),
+            "embedded_count": int(manager_diagnostics.get("embedded_count", 0)),
+            "embedding_available": bool(manager_diagnostics.get("embedding_available", False)),
+            "retrieval_mode": manager_diagnostics.get("retrieval_mode", "keyword_fallback"),
+            "embedding_attempted": bool(manager_diagnostics.get("embedding_attempted", False)),
+            "embedding_failed": bool(manager_diagnostics.get("embedding_failed", False)),
+            "confidence_threshold": confidence_threshold,
+            "raw_min_score": raw_min_score,
+            "raw_candidate_count": len(raw_candidates),
+            "ranked_candidate_count": len(ranked_candidates),
+            "final_candidate_count": len(final_candidates),
+        }
+        return {"candidates": final_candidates, "diagnostics": diagnostics}
         
     async def recall_context(self, query: str, policy: RetrievalPolicy, current_workspace: str = None) -> Optional[Dict[str, Any]]:
         """
@@ -44,41 +110,14 @@ class MemoryAgent:
             
         logger.info(f"[MEMORY AGENT] Initiating recall: Policy={policy.value}, Query='{query}'")
         
-        # 2. Apply Policy Constraints
-        limit = 3 if policy == RetrievalPolicy.FAST_CONTEXT else 10
-        confidence_threshold = {
-            RetrievalPolicy.FAST_CONTEXT: 0.85,
-            RetrievalPolicy.PROJECT_RECALL: 0.05,
-            RetrievalPolicy.DEEP_RESEARCH: 0.70,
-            RetrievalPolicy.DEBUG_RECONSTRUCTION: 0.05,
-            RetrievalPolicy.PERSONAL_CONTINUITY: 0.05,
-        }[policy]
-        
-        # 3. Fetch semantic or keyword candidates from the memory backend.
-        raw_candidates = await memory_manager.retrieve_relevant_context(
-            query,
-            limit=limit * 2,
-            min_score=0.05,
-        )
-        if not raw_candidates:
+        search_result = await self.search_candidates(query, policy, current_workspace=current_workspace)
+        final_candidates = search_result["candidates"]
+        if not search_result["diagnostics"]["raw_candidate_count"]:
             logger.info("[MEMORY AGENT] Empty candidate pool.")
             return None
-            
-        # 5. Ranking Heuristics (Isolation & Deduplication)
-        ranked_candidates = self._apply_ranking_heuristics(raw_candidates, current_workspace)
-        
-        # 6. Apply Confidence Threshold & Truncation
-        # Note: In a real vector DB we get distance/similarity scores back. Since we used a raw pgvector 
-        # <-> operator in manager.py, we need to adapt it to return the exact score, or approximate 
-        # the confidence here. For MVP, we will simulate the threshold check based on ranking viability.
-        if not ranked_candidates:
+        if not search_result["diagnostics"]["ranked_candidate_count"]:
             logger.info("[MEMORY AGENT] All candidates failed confidence/isolation thresholds.")
             return None
-            
-        final_candidates = [
-            candidate for candidate in ranked_candidates
-            if candidate.get("score", 0.0) >= confidence_threshold
-        ][:limit]
         if not final_candidates:
             logger.info("[MEMORY AGENT] No candidates met confidence threshold.")
             return None
@@ -97,6 +136,7 @@ class MemoryAgent:
                 "source_trace_ids": source_trace_ids,
                 "policy_used": policy.value,
                 "candidate_count": len(final_candidates),
+                "diagnostics": search_result["diagnostics"],
             }
         }
 

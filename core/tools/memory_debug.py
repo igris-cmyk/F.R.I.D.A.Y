@@ -1,7 +1,9 @@
 import asyncio
+import argparse
 import json
 import sys
 
+from core.agents.memory_agent import RetrievalPolicy, memory_agent
 from core.memory.manager import memory_manager
 from core.memory.summarizer import summarize_completed_trace
 
@@ -60,9 +62,9 @@ def _looks_like_legacy_summary(summary: object) -> bool:
 
 
 async def main() -> int:
-    command = sys.argv[1] if len(sys.argv) > 1 else "health"
-    verbose = "--verbose" in sys.argv
-    args = [arg for arg in sys.argv[2:] if arg != "--verbose"]
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:])
+    command = args.command
     await memory_manager.initialize()
 
     if command == "health":
@@ -71,20 +73,66 @@ async def main() -> int:
 
     if command == "list":
         rows = await asyncio.to_thread(memory_manager.store.list_memories, 20)
-        print(json.dumps([compact_memory_row(row, verbose=verbose) for row in rows], indent=2, sort_keys=True))
+        print(json.dumps([compact_memory_row(row, verbose=args.verbose) for row in rows], indent=2, sort_keys=True))
         return 0
 
     if command == "search":
-        query = " ".join(args).strip()
+        query = " ".join(args.query).strip()
         if not query:
-            print("Usage: core/.venv/bin/python -m core.tools.memory_debug search \"query\" [--verbose]", file=sys.stderr)
-            return 2
-        results = await memory_manager.retrieve_relevant_context(query, limit=5, min_score=0.05)
-        print(json.dumps([compact_memory_row(row, verbose=verbose) for row in results], indent=2, sort_keys=True))
+            parser.error("search requires a query")
+        policy = parse_policy(args.policy)
+        search_result = await memory_agent.search_candidates(query, policy)
+        results = search_result["candidates"]
+        print(json.dumps([compact_memory_row(row, verbose=args.verbose) for row in results], indent=2, sort_keys=True))
+        if not results:
+            diagnostics = search_result["diagnostics"]
+            print(
+                (
+                    "[INFO] No memory results. "
+                    f"item_count={diagnostics['item_count']} "
+                    f"embedded_count={diagnostics.get('embedded_count', 0)} "
+                    f"embedding_available={str(diagnostics['embedding_available']).lower()} "
+                    f"retrieval_mode={diagnostics['retrieval_mode']} "
+                    f"threshold={diagnostics['confidence_threshold']} "
+                    f"raw_candidates={diagnostics['raw_candidate_count']} "
+                    f"ranked_candidates={diagnostics['ranked_candidate_count']}"
+                ),
+                file=sys.stderr,
+            )
         return 0
 
-    print("Usage: memory_debug.py [health|list [--verbose]|search QUERY [--verbose]]", file=sys.stderr)
+    parser.print_help(sys.stderr)
     return 2
+
+
+def parse_policy(value: str) -> RetrievalPolicy:
+    normalized = (value or "project_recall").strip().lower()
+    if normalized == "default":
+        normalized = RetrievalPolicy.PROJECT_RECALL.value
+    for policy in RetrievalPolicy:
+        if policy.value == normalized:
+            return policy
+    raise ValueError(f"Unknown policy: {value}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Inspect FRIDAY persistent memory.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("health", help="Show memory backend health.")
+
+    list_parser = subparsers.add_parser("list", help="List recent memory items.")
+    list_parser.add_argument("--verbose", action="store_true", help="Include metadata and previews.")
+
+    search_parser = subparsers.add_parser("search", help="Search memory items.")
+    search_parser.add_argument("query", nargs="+", help="Memory search query.")
+    search_parser.add_argument(
+        "--policy",
+        default="project_recall",
+        help="Retrieval policy: project_recall, deep_research, fast_context, debug_reconstruct, personal_continuity, or default.",
+    )
+    search_parser.add_argument("--verbose", action="store_true", help="Include metadata and previews.")
+    return parser
 
 
 if __name__ == "__main__":

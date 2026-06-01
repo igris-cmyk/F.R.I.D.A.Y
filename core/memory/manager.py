@@ -213,27 +213,98 @@ class MemoryManager:
         limit: int = 5,
         min_score: float = 0.15,
     ) -> list[Dict[str, Any]]:
+        retrieval = await self.retrieve_relevant_context_with_diagnostics(
+            query=query,
+            limit=limit,
+            min_score=min_score,
+        )
+        return retrieval["results"]
+
+    async def retrieve_relevant_context_with_diagnostics(
+        self,
+        query: str | list[float],
+        limit: int = 5,
+        min_score: float = 0.15,
+    ) -> Dict[str, Any]:
         if self.health_state == MemoryHealthState.OFFLINE:
-            return []
+            return {
+                "results": [],
+                "diagnostics": {
+                    "retrieval_mode": "offline",
+                    "item_count": 0,
+                    "embedded_count": 0,
+                    "embedding_available": self.embedding_available,
+                },
+            }
 
         rows = list(self.store.iter_searchable_memories(limit=1000))
         if not rows:
-            return []
+            return {
+                "results": [],
+                "diagnostics": {
+                    "retrieval_mode": "keyword_fallback",
+                    "item_count": 0,
+                    "embedded_count": 0,
+                    "embedding_available": self.embedding_available,
+                },
+            }
 
         query_embedding = query if isinstance(query, list) else None
         query_text = "" if isinstance(query, list) else str(query)
-        if query_embedding is None and self.embedding_available:
-            query_embedding = await self.generate_embedding(query_text)
+        embedded_count = sum(1 for row in rows if row.get("embedding_json"))
+        embedding_attempted = False
+        embedding_failed = False
+        retrieval_mode = "keyword_fallback"
 
-        if query_embedding:
-            scored = self._score_by_embedding(query_embedding, rows)
-        else:
-            scored = self._score_by_keywords(query_text, rows)
+        if query_embedding is None and self.embedding_available and embedded_count > 0:
+            embedding_attempted = True
+            query_embedding = await self.generate_embedding(query_text)
+            if query_embedding is None:
+                embedding_failed = True
+
+        scored_embedding: list[Dict[str, Any]] = []
+        if query_embedding and embedded_count > 0:
+            embedding_attempted = True
+            scored_embedding = self._score_by_embedding(query_embedding, rows)
+            filtered_embedding = [item for item in scored_embedding if item["score"] >= min_score]
+            if filtered_embedding:
+                retrieval_mode = "embedding"
+                results = filtered_embedding[:limit]
+                self.store.mark_accessed([item["id"] for item in results])
+                return {
+                    "results": results,
+                    "diagnostics": {
+                        "retrieval_mode": retrieval_mode,
+                        "item_count": len(rows),
+                        "embedded_count": embedded_count,
+                        "embedding_available": self.embedding_available,
+                        "embedding_attempted": embedding_attempted,
+                        "embedding_failed": embedding_failed,
+                        "raw_embedding_candidate_count": len(scored_embedding),
+                    },
+                }
+
+        scored = self._score_by_keywords(query_text, rows)
+        if embedding_attempted and (embedding_failed or embedded_count == 0 or not scored_embedding):
+            retrieval_mode = "keyword_fallback"
+        elif embedding_attempted:
+            retrieval_mode = "hybrid_fallback"
 
         filtered = [item for item in scored if item["score"] >= min_score]
         results = filtered[:limit]
         self.store.mark_accessed([item["id"] for item in results])
-        return results
+        return {
+            "results": results,
+            "diagnostics": {
+                "retrieval_mode": retrieval_mode,
+                "item_count": len(rows),
+                "embedded_count": embedded_count,
+                "embedding_available": self.embedding_available,
+                "embedding_attempted": embedding_attempted,
+                "embedding_failed": embedding_failed,
+                "raw_embedding_candidate_count": len(scored_embedding),
+            },
+        }
 
     async def generate_embedding(self, text: str) -> Optional[list[float]]:
         if not text:
