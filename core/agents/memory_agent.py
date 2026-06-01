@@ -129,7 +129,14 @@ class MemoryAgent:
         Transforms episodic traces into a distilled continuity block.
         Prevents prompt flooding.
         """
-        context_dump = "\n".join([f"- Intent: {c['intent']}\n  Outcome: {c['workflow_summary']}" for c in candidates])
+        context_dump = "\n".join([
+            (
+                f"- Title: {c.get('title') or c.get('intent')}\n"
+                f"  Summary: {c.get('workflow_summary') or c.get('summary')}\n"
+                f"  Key files: {', '.join(c.get('key_files') or [])}"
+            )
+            for c in candidates
+        ])
         
         prompt = PromptTemplate.from_template(
             "You are a cognitive memory reconstruction agent.\n"
@@ -157,14 +164,17 @@ class MemoryAgent:
             return self._deterministic_recall_summary(candidates, reason=f"reconstruction_failed:{exc}")
 
     def _deterministic_recall_summary(self, candidates: List[Dict], reason: str) -> str:
-        lines = [f"Relevant continuity found ({reason})."]
+        lines = ["Relevant continuity found."]
         for index, candidate in enumerate(candidates[:5], start=1):
-            intent = candidate.get("intent") or "unknown"
+            title = candidate.get("title") or candidate.get("intent") or "Memory item"
             summary = candidate.get("workflow_summary") or candidate.get("summary") or ""
             summary = " ".join(str(summary).split())
             if len(summary) > 500:
                 summary = summary[:497] + "..."
-            lines.append(f"{index}. {intent}: {summary}")
+            key_files = candidate.get("key_files") or []
+            if key_files:
+                summary = f"{summary} Key files: {', '.join(key_files[:6])}."
+            lines.append(f"{index}. {title}\n   {summary}")
         return "\n".join(lines)
 
 memory_agent = MemoryAgent()

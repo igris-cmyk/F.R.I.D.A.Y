@@ -97,6 +97,12 @@
         "core/memory",
         "manager.py",
         "pipeline.py"
+      ],
+      "must_not_contain": [
+        "SUCCESS filesystem.search",
+        "compression_timeout",
+        "reconstruction_timeout",
+        "[TRUNCATED]"
       ]
     }
   },

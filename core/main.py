@@ -579,6 +579,7 @@ async def main():
             success = False
             output = ""
             exec_ms = 0
+            trace_memory_metadata: Dict[str, Any] = {"routing": routing_metadata}
             
             if intent_type == "memory":
                 query = final_state["parameters"].get("query") or intent.payload.raw_command
@@ -793,6 +794,38 @@ async def main():
                     
                     output = "\n".join(results)
                     exec_ms = int((time.time() - plan_start) * 1000)
+                    trace_memory_metadata.update({
+                        "workflow": {
+                            "selected_files": workflow_context["metadata"].get("selected_files", []),
+                            "ranked_files": workflow_context["metadata"].get("ranked_files", []),
+                            "files_read": [
+                                {
+                                    "path": item.get("path"),
+                                    "size": item.get("size"),
+                                    "truncated": item.get("truncated", False),
+                                }
+                                for item in workflow_context.get("files_read", [])
+                            ],
+                            "step_results": [
+                                {"capability_id": item.get("capability_id")}
+                                for item in workflow_context.get("step_results", [])
+                            ],
+                        },
+                        "selected_files": workflow_context["metadata"].get("selected_files", []),
+                        "files_read": [
+                            {
+                                "path": item.get("path"),
+                                "size": item.get("size"),
+                                "truncated": item.get("truncated", False),
+                            }
+                            for item in workflow_context.get("files_read", [])
+                        ],
+                        "capabilities_used": [
+                            item.get("capability_id")
+                            for item in workflow_context.get("step_results", [])
+                            if item.get("capability_id")
+                        ],
+                    })
             
             # Memory Hook: Trigger asynchronous cognitive compression pipeline
             # This is fire-and-forget; it must NOT block the orchestrator or routing loops.
@@ -804,7 +837,7 @@ async def main():
                     result=output,
                     error_state=not success,
                     environment=intent.payload.environment.model_dump() if intent.payload.environment else {},
-                    metadata={"routing": routing_metadata, "execution_ms": exec_ms}
+                    metadata={**trace_memory_metadata, "execution_ms": exec_ms}
                 )
             )
             memory_task.add_done_callback(log_memory_pipeline_task_result)

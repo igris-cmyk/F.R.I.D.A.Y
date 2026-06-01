@@ -13,6 +13,7 @@ from core.config import (
     OLLAMA_BASE_URL,
 )
 from core.memory.manager import MemoryHealthState, memory_manager, MemoryImportance
+from core.memory.summarizer import summarize_completed_trace
 
 logger = logging.getLogger("friday.memory.pipeline")
 
@@ -129,7 +130,8 @@ async def process_completed_trace(trace_id: str, intent: str, command: str, resu
             "intent": intent,
             "command": command,
             "result": result,
-            "error_state": error_state
+            "error_state": error_state,
+            "metadata": metadata or {},
         }
 
         importance = await score_relevance(normalized_trace)
@@ -140,12 +142,24 @@ async def process_completed_trace(trace_id: str, intent: str, command: str, resu
         logger.info("[MEMORY PIPELINE] Trace %s importance=%s", trace_id, importance.value.upper())
 
         compression_start = time.time()
-        workflow_summary = await compress_workflow(normalized_trace)
+        deterministic_summary = summarize_completed_trace(normalized_trace)
+        workflow_summary = deterministic_summary.summary
         compression_ms = int((time.time() - compression_start) * 1000)
 
         embedding_start = time.time()
         embedding_vector = await generate_embedding(workflow_summary)
         embedding_ms = int((time.time() - embedding_start) * 1000) if embedding_vector else 0
+
+        memory_metadata = {
+            **(metadata or {}),
+            **deterministic_summary.metadata(),
+            "compression_ms": compression_ms,
+            "compression_strategy": "deterministic",
+            "embedding_ms": embedding_ms,
+            "command": command,
+            "intent_type": intent,
+            "content_preview": deterministic_summary.content_preview,
+        }
 
         persistence_result = await memory_manager.persist_episodic_trace(
             trace_id=trace_id,
@@ -153,14 +167,7 @@ async def process_completed_trace(trace_id: str, intent: str, command: str, resu
             importance=importance,
             workflow_summary=workflow_summary,
             environment_context=environment,
-            metadata={
-                "compression_ms": compression_ms,
-                "embedding_ms": embedding_ms,
-                "command": command,
-                "intent_type": intent,
-                "result_preview": result[:2000],
-                **metadata,
-            },
+            metadata=memory_metadata,
             embedding=embedding_vector
         )
 

@@ -11,7 +11,9 @@ from core.memory.migrations import apply_migrations, get_schema_version
 from core.memory.manager import MemoryHealthState, MemoryImportance, MemoryManager, cosine_similarity
 from core.memory import pipeline as memory_pipeline
 from core.memory.redaction import redact_text
+from core.memory.summarizer import summarize_completed_trace
 from core.memory.sqlite_store import SQLiteMemoryStore
+from core.tools.memory_debug import compact_memory_row
 
 
 class TestSQLiteMemoryBackend(unittest.IsolatedAsyncioTestCase):
@@ -382,6 +384,100 @@ class TestMemoryRedaction(unittest.TestCase):
         self.assertEqual(cosine_similarity([1.0], [1.0, 0.0]), 0.0)
 
 
+class TestDeterministicMemorySummarizer(unittest.TestCase):
+    def test_research_trace_summary_is_human_readable(self):
+        summary = summarize_completed_trace({
+            "trace_id": "trace-arch",
+            "intent": "research",
+            "command": "analyze repository architecture",
+            "result": "SUCCESS filesystem.search: {'files': ['core/main.py', 'core/agents/planner.py']}",
+            "error_state": False,
+            "metadata": {
+                "selected_files": [
+                    "core/main.py",
+                    "core/agents/planner.py",
+                    "core/capabilities/executor.py",
+                    "core/security/permissions.py",
+                ],
+                "capabilities_used": ["filesystem.search", "filesystem.read", "research.synthesize"],
+            },
+        })
+
+        self.assertEqual(summary.title, "Repository architecture inspection")
+        self.assertIn("We inspected the repository architecture", summary.summary)
+        self.assertIn("core/main.py", summary.key_files)
+        self.assertNotIn("SUCCESS filesystem.search", summary.summary)
+
+    def test_memory_subsystem_summary_extracts_key_memory_files(self):
+        summary = summarize_completed_trace({
+            "trace_id": "trace-memory",
+            "intent": "research",
+            "command": "explain memory subsystem",
+            "result": (
+                "SUCCESS filesystem.search: {'files': ['core/main.py', "
+                "'core/memory/manager.py', 'core/memory/pipeline.py', "
+                "'core/memory/retriever.py', 'core/agents/memory_agent.py']}"
+            ),
+            "error_state": False,
+            "metadata": {},
+        })
+
+        self.assertEqual(summary.key_files[:4], [
+            "core/memory/manager.py",
+            "core/memory/pipeline.py",
+            "core/memory/retriever.py",
+            "core/agents/memory_agent.py",
+        ])
+        self.assertIn("SQLite persistence", summary.summary)
+
+    def test_approval_workflow_summary_extracts_security_files(self):
+        summary = summarize_completed_trace({
+            "trace_id": "trace-approval",
+            "intent": "research",
+            "command": "show approval workflow",
+            "result": (
+                "SUCCESS filesystem.search: {'files': ['core/main.py', "
+                "'core/security/permissions.py', 'core/security/approval.py', "
+                "'core/schemas/events.py']}"
+            ),
+            "error_state": False,
+            "metadata": {},
+        })
+
+        self.assertEqual(summary.title, "Approval workflow inspection")
+        self.assertIn("core/security/approval.py", summary.key_files)
+        self.assertIn("SecurityPolicy", summary.summary)
+
+    def test_security_denial_summary_is_safety_oriented(self):
+        summary = summarize_completed_trace({
+            "trace_id": "trace-denial",
+            "intent": "terminal",
+            "command": "delete everything in this folder",
+            "result": "FAILED shell.execute: explicitly blocked by SecurityPolicy",
+            "error_state": True,
+            "metadata": {},
+        })
+
+        self.assertEqual(summary.title, "Blocked destructive request")
+        self.assertIn("blocked", summary.summary.lower())
+        self.assertIn("SecurityPolicy", summary.summary)
+        self.assertNotIn("SUCCESS filesystem.search", summary.summary)
+
+    def test_summary_respects_limits_and_redaction(self):
+        summary = summarize_completed_trace({
+            "trace_id": "trace-secret",
+            "intent": "research",
+            "command": "explain memory subsystem",
+            "result": "token=supersecret " + ("SUCCESS filesystem.search " * 200),
+            "error_state": False,
+            "metadata": {},
+        })
+
+        self.assertLessEqual(len(summary.summary), 1200 + len("\n...[TRUNCATED]...\n"))
+        self.assertNotIn("supersecret", summary.summary)
+        self.assertNotIn("compression_timeout", summary.summary)
+
+
 class TestMemoryAgentBackend(unittest.IsolatedAsyncioTestCase):
     async def test_does_not_hallucinate_when_no_memory_exists(self):
         agent = MemoryAgent()
@@ -416,7 +512,11 @@ class TestMemoryAgentBackend(unittest.IsolatedAsyncioTestCase):
                 importance=MemoryImportance.SEMANTIC,
                 workflow_summary="Memory subsystem persistence was implemented.",
                 environment_context={},
-                metadata={"command": "explain memory subsystem"},
+                metadata={
+                    "command": "explain memory subsystem",
+                    "title": "Memory subsystem inspection",
+                    "key_files": ["core/memory/manager.py"],
+                },
             )
             memory_agent_module.memory_manager = manager
             result = await agent.recall_context("memory subsystem persistence", RetrievalPolicy.DEEP_RESEARCH)
@@ -447,7 +547,11 @@ class TestMemoryAgentBackend(unittest.IsolatedAsyncioTestCase):
                     "core/agents/memory_agent.py."
                 ),
                 environment_context={},
-                metadata={"command": "explain memory subsystem"},
+                metadata={
+                    "command": "explain memory subsystem",
+                    "title": "Memory subsystem inspection",
+                    "key_files": ["core/memory/manager.py", "core/memory/pipeline.py"],
+                },
             )
             memory_agent_module.memory_manager = manager
             result = await agent.recall_context(
@@ -460,6 +564,24 @@ class TestMemoryAgentBackend(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["narrative"], "We inspected the memory subsystem files.")
         self.assertEqual(result["lineage"]["source_trace_ids"], ["trace-natural"])
+
+    async def test_recall_fallback_uses_clean_summaries(self):
+        agent = MemoryAgent()
+        output = agent._deterministic_recall_summary([
+            {
+                "title": "Memory subsystem inspection",
+                "summary": "We inspected the memory subsystem.",
+                "workflow_summary": "We inspected the memory subsystem.",
+                "key_files": ["core/memory/manager.py", "core/memory/pipeline.py"],
+                "trace_id": "trace-memory",
+            }
+        ], reason="reconstruction_timeout")
+
+        self.assertIn("Relevant continuity found.", output)
+        self.assertIn("Memory subsystem inspection", output)
+        self.assertIn("core/memory/manager.py", output)
+        self.assertNotIn("reconstruction_timeout", output)
+        self.assertNotIn("SUCCESS filesystem.search", output)
 
     async def test_respects_confidence_threshold(self):
         agent = MemoryAgent()
@@ -496,9 +618,7 @@ class TestCompletedTracePersistence(unittest.IsolatedAsyncioTestCase):
         self.old_compress = memory_pipeline.compress_workflow
         self.old_generate_embedding = memory_pipeline.generate_embedding
         memory_pipeline.memory_manager = self.manager
-        memory_pipeline.compress_workflow = AsyncMock(
-            return_value="Grounded repository architecture summary from inspected files."
-        )
+        memory_pipeline.compress_workflow = AsyncMock(return_value="This should not be the primary summary.")
         memory_pipeline.generate_embedding = AsyncMock(return_value=None)
 
     async def asyncTearDown(self):
@@ -512,7 +632,11 @@ class TestCompletedTracePersistence(unittest.IsolatedAsyncioTestCase):
             trace_id="trace-meaningful",
             intent="research",
             command="analyze repository architecture",
-            result="SUCCESS research.synthesize: grounded architecture summary",
+            result=(
+                "SUCCESS filesystem.search: {'files': ['core/main.py']}\n"
+                "SUCCESS filesystem.read: bound 1 files for synthesis\n"
+                "SUCCESS research.synthesize: grounded architecture summary"
+            ),
             error_state=False,
             environment={"working_directory": "/repo"},
             metadata={"execution_ms": 123},
@@ -522,7 +646,11 @@ class TestCompletedTracePersistence(unittest.IsolatedAsyncioTestCase):
         rows = self.manager.store.list_memories()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["user_intent"], "analyze repository architecture")
-        self.assertIn("Grounded repository architecture", rows[0]["summary"])
+        self.assertIn("repository architecture", rows[0]["summary"])
+        self.assertNotIn("SUCCESS filesystem.search", rows[0]["summary"])
+        metadata = json.loads(rows[0]["metadata_json"])
+        self.assertEqual(metadata["title"], "Repository architecture inspection")
+        self.assertIn("filesystem.search", metadata["capabilities_used"])
 
     async def test_trivial_conversation_does_not_persist(self):
         result = await memory_pipeline.process_completed_trace(
@@ -554,6 +682,7 @@ class TestCompletedTracePersistence(unittest.IsolatedAsyncioTestCase):
         row = self.manager.store.list_memories()[0]
         self.assertEqual(row["importance"], MemoryImportance.EPISODIC.value)
         self.assertEqual(row["user_intent"], "delete everything in this folder")
+        self.assertIn("blocked", row["summary"].lower())
 
     async def test_memory_manager_initialized_before_persist(self):
         self.manager.health_state = MemoryHealthState.OFFLINE
@@ -613,7 +742,7 @@ class TestCompletedTracePersistence(unittest.IsolatedAsyncioTestCase):
         self.assertIn("queued_retry", result["degraded_reason"])
         self.assertFalse(any("Persisted memory item" in line for line in logs.output))
 
-    async def test_compression_failure_falls_back_and_persists(self):
+    async def test_llm_compression_failure_does_not_degrade_deterministic_summary(self):
         memory_pipeline.compress_workflow = AsyncMock(side_effect=RuntimeError("ollama broke"))
 
         result = await memory_pipeline.process_completed_trace(
@@ -626,8 +755,46 @@ class TestCompletedTracePersistence(unittest.IsolatedAsyncioTestCase):
             metadata={},
         )
 
-        self.assertFalse(result["persisted"])
-        self.assertIn("ollama broke", result["degraded_reason"])
+        self.assertTrue(result["persisted"])
+        row = self.manager.store.list_memories()[0]
+        self.assertIn("memory subsystem", row["summary"])
+        self.assertNotIn("ollama broke", row["summary"])
+        self.assertNotIn("compression_timeout", row["summary"])
+
+
+class TestMemoryDebugFormatting(unittest.TestCase):
+    def test_compact_memory_row_hides_raw_metadata_by_default(self):
+        row = {
+            "trace_id": "trace-memory",
+            "summary": "We inspected the memory subsystem.",
+            "metadata_json": json.dumps({
+                "title": "Memory subsystem inspection",
+                "key_files": ["core/memory/manager.py"],
+                "result_preview": "SUCCESS filesystem.search: raw dump",
+            }),
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "memory_type": "SEMANTIC",
+            "importance": "semantic",
+        }
+
+        compact = compact_memory_row(row)
+
+        self.assertEqual(compact["title"], "Memory subsystem inspection")
+        self.assertEqual(compact["key_files"], ["core/memory/manager.py"])
+        self.assertNotIn("metadata", compact)
+
+    def test_compact_memory_row_verbose_keeps_metadata(self):
+        row = {
+            "trace_id": "trace-memory",
+            "summary": "We inspected the memory subsystem.",
+            "metadata_json": json.dumps({"title": "Memory subsystem inspection"}),
+            "content_preview": "Title: Memory subsystem inspection",
+        }
+
+        compact = compact_memory_row(row, verbose=True)
+
+        self.assertIn("metadata", compact)
+        self.assertIn("content_preview", compact)
 
 
 if __name__ == "__main__":

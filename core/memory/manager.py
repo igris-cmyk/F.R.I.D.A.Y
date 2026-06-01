@@ -14,10 +14,13 @@ from core.config import (
     FRIDAY_EMBEDDING_MODEL,
     FRIDAY_MEMORY_BACKEND,
     FRIDAY_MEMORY_DB_PATH,
+    FRIDAY_MEMORY_PREVIEW_MAX_CHARS,
+    FRIDAY_MEMORY_SUMMARY_MAX_CHARS,
     OLLAMA_BASE_URL,
 )
 from core.memory.redaction import redact_text
 from core.memory.sqlite_store import SQLiteMemoryStore, decode_embedding
+from core.memory.summarizer import summarize_completed_trace
 
 logger = logging.getLogger("friday.memory.manager")
 
@@ -146,8 +149,11 @@ class MemoryManager:
                 "memory_id": None,
             }
 
-        summary = redact_text(workflow_summary, max_chars=2000)
-        content_preview = redact_text(metadata.get("result_preview", workflow_summary), max_chars=4000)
+        summary = redact_text(workflow_summary, max_chars=FRIDAY_MEMORY_SUMMARY_MAX_CHARS)
+        content_preview = redact_text(
+            metadata.get("content_preview") or metadata.get("result_preview", workflow_summary),
+            max_chars=FRIDAY_MEMORY_PREVIEW_MAX_CHARS,
+        )
         embedded = False
         degraded_reason = None
 
@@ -286,7 +292,10 @@ class MemoryManager:
             return []
         scored = []
         for row in rows:
-            haystack = f"{row.get('summary', '')} {row.get('content_preview', '')} {row.get('user_intent', '')}".lower()
+            haystack = (
+                f"{row.get('summary', '')} {row.get('content_preview', '')} "
+                f"{row.get('user_intent', '')} {row.get('metadata_json', '')}"
+            ).lower()
             matches = sum(1 for term in terms if term in haystack)
             if matches:
                 scored.append(self._result_from_row(row, matches / max(len(terms), 1)))
@@ -298,27 +307,47 @@ class MemoryManager:
             metadata = json.loads(row.get("metadata_json") or "{}")
         except json.JSONDecodeError:
             metadata = {}
+        summary = row.get("summary")
+        title = metadata.get("title")
+        key_files = metadata.get("key_files", [])
+        if _looks_like_legacy_memory_summary(summary):
+            display_summary = summarize_completed_trace({
+                "trace_id": row.get("trace_id"),
+                "intent": metadata.get("intent_type") or row.get("source_component") or "",
+                "command": row.get("user_intent") or metadata.get("command") or "",
+                "result": f"{row.get('summary', '')}\n{row.get('content_preview', '')}",
+                "error_state": row.get("importance") == MemoryImportance.CRITICAL.value,
+                "metadata": metadata,
+            })
+            summary = display_summary.summary
+            title = title or display_summary.title
+            key_files = key_files or display_summary.key_files
         return {
             "id": row["id"],
             "trace_id": row.get("trace_id"),
             "score": round(float(score), 6),
-            "summary": row.get("summary"),
-            "workflow_summary": row.get("summary"),
+            "summary": summary,
+            "workflow_summary": summary,
             "memory_type": row.get("memory_type"),
             "importance": row.get("importance"),
             "created_at": row.get("created_at"),
             "source_metadata": metadata,
+            "title": title,
+            "key_files": key_files,
             "intent": row.get("user_intent") or row.get("source_component"),
         }
 
     def _redact_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        redacted: Dict[str, Any] = {}
-        for key, value in (metadata or {}).items():
-            if isinstance(value, str):
-                redacted[key] = redact_text(value, max_chars=1000)
-            else:
-                redacted[key] = value
-        return redacted
+        return self._redact_metadata_value(metadata)
+
+    def _redact_metadata_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return redact_text(value, max_chars=1000)
+        if isinstance(value, dict):
+            return {str(key): self._redact_metadata_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._redact_metadata_value(item) for item in value[:100]]
+        return value
 
     def _memory_type_for_importance(self, importance: MemoryImportance) -> MemoryType:
         if importance == MemoryImportance.SEMANTIC:
@@ -372,6 +401,19 @@ def extract_memory_keywords(query: str) -> set[str]:
         for token in tokens
         if len(token) > 2 and token not in MEMORY_STOPWORDS
     }
+
+
+def _looks_like_legacy_memory_summary(summary: Any) -> bool:
+    text = str(summary or "")
+    return any(
+        marker in text
+        for marker in (
+            "SUCCESS filesystem.search",
+            "compression_timeout",
+            "Outcome summary generated deterministically",
+            "Result preview:",
+        )
+    )
 
 
 memory_manager = MemoryManager()
