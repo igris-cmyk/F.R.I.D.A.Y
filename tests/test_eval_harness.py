@@ -1,12 +1,15 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
+from core.memory.migrations import get_schema_version
 from core.tools.eval_harness import (
     EvalTraceResult,
     build_report,
     evaluate_result,
+    initialize_eval_memory,
     load_cases,
     render_markdown_report,
     reset_eval_memory_db,
@@ -119,6 +122,35 @@ class TestEvalHarness(unittest.TestCase):
 
         self.assertFalse(evaluated.passed)
         self.assertIn("security_blocked", evaluated.failure_reason)
+
+
+class TestEvalHarnessMemoryIsolation(unittest.IsolatedAsyncioTestCase):
+    async def test_eval_memory_initialization_records_schema_version(self):
+        from core.memory.manager import MemoryHealthState, memory_manager
+
+        old_db_path = memory_manager.db_path
+        old_store = memory_manager.store
+        old_health_state = memory_manager.health_state
+        old_degraded_reason = memory_manager.degraded_reason
+        old_embedding_available = memory_manager.embedding_available
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "eval_memory.sqlite3"
+            try:
+                await initialize_eval_memory(db_path)
+                conn = sqlite3.connect(db_path)
+                try:
+                    version = get_schema_version(conn)
+                finally:
+                    conn.close()
+            finally:
+                memory_manager.db_path = old_db_path
+                memory_manager.store = old_store
+                memory_manager.health_state = old_health_state or MemoryHealthState.OFFLINE
+                memory_manager.degraded_reason = old_degraded_reason
+                memory_manager.embedding_available = old_embedding_available
+
+        self.assertEqual(version, 1)
 
 
 if __name__ == "__main__":

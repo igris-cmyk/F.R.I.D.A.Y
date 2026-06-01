@@ -1,14 +1,17 @@
 import asyncio
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 from core.agents.memory_agent import MemoryAgent, RetrievalPolicy
+from core.memory.migrations import apply_migrations, get_schema_version
 from core.memory.manager import MemoryHealthState, MemoryImportance, MemoryManager, cosine_similarity
 from core.memory import pipeline as memory_pipeline
 from core.memory.redaction import redact_text
+from core.memory.sqlite_store import SQLiteMemoryStore
 
 
 class TestSQLiteMemoryBackend(unittest.IsolatedAsyncioTestCase):
@@ -28,9 +31,28 @@ class TestSQLiteMemoryBackend(unittest.IsolatedAsyncioTestCase):
         health = await self.manager.health()
         self.assertEqual(health["backend"], "sqlite")
         self.assertEqual(health["requested_backend"], "sqlite")
+        self.assertEqual(health["schema_version"], 1)
+        self.assertEqual(health["target_schema_version"], 1)
+        self.assertEqual(health["migration_status"], "ok")
         self.assertEqual(health["item_count"], 0)
         self.assertEqual(health["embedded_count"], 0)
         self.assertEqual(health["health_state"], MemoryHealthState.DEGRADED.value)
+
+    async def test_fresh_db_creates_schema_migrations_and_base_tables(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table';").fetchall()
+            }
+            version = get_schema_version(conn)
+        finally:
+            conn.close()
+
+        self.assertIn("schema_migrations", tables)
+        self.assertIn("memory_items", tables)
+        self.assertIn("memory_events", tables)
+        self.assertEqual(version, 1)
 
     async def test_postgres_requested_falls_back_to_sqlite_not_offline(self):
         manager = MemoryManager(
@@ -178,6 +200,171 @@ class TestSQLiteMemoryBackend(unittest.IsolatedAsyncioTestCase):
         health = await self.manager.health()
         self.assertEqual(health["backend"], "sqlite")
         self.assertEqual(health["item_count"], 1)
+
+
+class TestSQLiteMemoryMigrations(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "memory.sqlite3"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _create_legacy_base_schema(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE memory_items (
+                    id TEXT PRIMARY KEY,
+                    trace_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    memory_type TEXT NOT NULL,
+                    importance TEXT NOT NULL,
+                    workspace_root TEXT,
+                    project_scope TEXT,
+                    source_component TEXT,
+                    user_intent TEXT,
+                    summary TEXT NOT NULL,
+                    content_preview TEXT,
+                    metadata_json TEXT,
+                    embedding_json TEXT,
+                    embedding_model TEXT,
+                    token_estimate INTEGER,
+                    access_count INTEGER DEFAULT 0,
+                    last_accessed_at TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE memory_events (
+                    id TEXT PRIMARY KEY,
+                    memory_id TEXT,
+                    event_type TEXT,
+                    created_at TEXT NOT NULL,
+                    metadata_json TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO memory_items (
+                    id, trace_id, created_at, updated_at, memory_type, importance,
+                    summary, metadata_json, token_estimate, access_count
+                )
+                VALUES (
+                    'memory-1', 'trace-legacy', '2026-01-01T00:00:00+00:00',
+                    '2026-01-01T00:00:00+00:00', 'EPISODIC', 'episodic',
+                    'Legacy memory row', '{}', 3, 0
+                );
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_existing_db_without_migration_table_is_adopted_preserving_rows(self):
+        self._create_legacy_base_schema()
+
+        store = SQLiteMemoryStore(str(self.db_path))
+        store.initialize()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            version = get_schema_version(conn)
+            count = conn.execute("SELECT COUNT(*) FROM memory_items;").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(version, 1)
+        self.assertEqual(count, 1)
+        self.assertEqual(store.migration_status, "ok")
+
+    def test_ensure_schema_is_idempotent(self):
+        self._create_legacy_base_schema()
+        store = SQLiteMemoryStore(str(self.db_path))
+
+        store.initialize()
+        store.initialize()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            version = get_schema_version(conn)
+            migration_records = conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 1;"
+            ).fetchone()[0]
+            row_count = conn.execute("SELECT COUNT(*) FROM memory_items;").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(version, 1)
+        self.assertEqual(migration_records, 1)
+        self.assertEqual(row_count, 1)
+
+    def test_newer_schema_version_is_unsupported_and_preserves_data(self):
+        self._create_legacy_base_schema()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE schema_migrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version INTEGER NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (999, 'future', '2026-01-01');"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        store = SQLiteMemoryStore(str(self.db_path))
+        with self.assertRaises(Exception):
+            store.initialize()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            version = get_schema_version(conn)
+            row_count = conn.execute("SELECT COUNT(*) FROM memory_items;").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(version, 999)
+        self.assertEqual(row_count, 1)
+        self.assertEqual(store.migration_status, "unsupported")
+
+    def test_failed_migration_rolls_back_version(self):
+        store = SQLiteMemoryStore(str(self.db_path))
+        store.initialize()
+
+        def failing_migration(conn):
+            conn.execute("CREATE TABLE should_rollback (id TEXT);")
+            raise RuntimeError("forced migration failure")
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with self.assertRaises(Exception):
+                apply_migrations(
+                    conn,
+                    current_version=1,
+                    target_version=2,
+                    migrations={2: ("forced_failure", failing_migration)},
+                )
+            version = get_schema_version(conn)
+            rollback_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='should_rollback';"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual(version, 1)
+        self.assertIsNone(rollback_table)
 
 
 class TestMemoryRedaction(unittest.TestCase):

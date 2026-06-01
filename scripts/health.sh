@@ -111,4 +111,37 @@ else
   status=1
 fi
 
+if [[ -x core/.venv/bin/python ]] && command -v python3 >/dev/null 2>&1; then
+  memory_health_json="$(core/.venv/bin/python -m core.tools.memory_debug health 2>/dev/null || true)"
+  memory_schema_version="$(
+    python3 -c '
+import json
+import sys
+
+try:
+    payload = json.loads(sys.stdin.read())
+except Exception:
+    raise SystemExit(0)
+
+schema_version = payload.get("schema_version")
+target = payload.get("target_schema_version")
+status = payload.get("migration_status")
+if schema_version is not None and target is not None and status:
+    print(f"{schema_version}|{target}|{status}")
+' <<<"${memory_health_json}"
+  )"
+  if [[ -n "${memory_schema_version}" ]]; then
+    IFS='|' read -r schema_version target_schema_version migration_status <<<"${memory_schema_version}"
+    if [[ "${migration_status}" == "ok" ]]; then
+      ok "Memory schema version: ${schema_version}/${target_schema_version}"
+    else
+      missing "Memory schema migration status: ${migration_status}"
+      printf '%s\n' "${memory_health_json}"
+      status=1
+    fi
+  else
+    missing "Memory schema version unavailable"
+  fi
+fi
+
 exit "${status}"

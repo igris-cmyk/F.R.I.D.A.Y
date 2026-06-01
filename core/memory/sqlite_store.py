@@ -1,9 +1,21 @@
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+
+from core.memory.migrations import (
+    CURRENT_SCHEMA_VERSION,
+    MigrationError,
+    UnsupportedSchemaVersion,
+    ensure_schema,
+    get_schema_version,
+)
+
+
+logger = logging.getLogger("friday.memory.sqlite_store")
 
 
 def utc_now() -> str:
@@ -35,6 +47,10 @@ class MemoryRecord:
 class SQLiteMemoryStore:
     def __init__(self, db_path: str):
         self.db_path = Path(db_path).expanduser()
+        self.schema_version: Optional[int] = None
+        self.target_schema_version = CURRENT_SCHEMA_VERSION
+        self.migration_status = "unknown"
+        self.migration_error: Optional[str] = None
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,44 +58,25 @@ class SQLiteMemoryStore:
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_items (
-                    id TEXT PRIMARY KEY,
-                    trace_id TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    memory_type TEXT NOT NULL,
-                    importance TEXT NOT NULL,
-                    workspace_root TEXT,
-                    project_scope TEXT,
-                    source_component TEXT,
-                    user_intent TEXT,
-                    summary TEXT NOT NULL,
-                    content_preview TEXT,
-                    metadata_json TEXT,
-                    embedding_json TEXT,
-                    embedding_model TEXT,
-                    token_estimate INTEGER,
-                    access_count INTEGER DEFAULT 0,
-                    last_accessed_at TEXT
-                );
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_events (
-                    id TEXT PRIMARY KEY,
-                    memory_id TEXT,
-                    event_type TEXT,
-                    created_at TEXT NOT NULL,
-                    metadata_json TEXT
-                );
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_trace_id ON memory_items(trace_id);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_created_at ON memory_items(created_at);")
-            conn.commit()
+            self.schema_version = ensure_schema(conn, target_version=self.target_schema_version)
+            self.migration_status = "ok"
+            self.migration_error = None
+        except UnsupportedSchemaVersion as exc:
+            self.schema_version = self._safe_schema_version(conn)
+            self.migration_status = "unsupported"
+            self.migration_error = str(exc)
+            raise
+        except MigrationError as exc:
+            self.schema_version = self._safe_schema_version(conn)
+            self.migration_status = "failed"
+            self.migration_error = str(exc)
+            raise
+        except Exception as exc:
+            self.schema_version = self._safe_schema_version(conn)
+            self.migration_status = "failed"
+            self.migration_error = str(exc)
+            logger.exception("SQLiteMemoryStore: migration failed: %s", exc)
+            raise
         finally:
             conn.close()
 
@@ -164,10 +161,24 @@ class SQLiteMemoryStore:
             conn.close()
         return {"item_count": int(item_count), "embedded_count": int(embedded_count)}
 
+    def migration_health(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "target_schema_version": self.target_schema_version,
+            "migration_status": self.migration_status,
+            "migration_error": self.migration_error,
+        }
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _safe_schema_version(self, conn: sqlite3.Connection) -> Optional[int]:
+        try:
+            return get_schema_version(conn)
+        except Exception:
+            return None
 
 
 def decode_embedding(row: Dict[str, Any]) -> Optional[list[float]]:

@@ -1,6 +1,12 @@
 # F.R.I.D.A.Y. Local Dev Startup
 
-Use the dev script from the repository root:
+Run all dev commands from the repository root:
+
+```bash
+cd /home/igris/F.R.I.D.A.Y
+```
+
+Use the dev script directly:
 
 ```bash
 ./scripts/dev.sh
@@ -12,6 +18,7 @@ Equivalent Make targets:
 make dev
 make health
 make stop
+make eval
 ```
 
 Useful direct commands:
@@ -19,6 +26,7 @@ Useful direct commands:
 ```bash
 ./scripts/health.sh
 ./scripts/stop-dev.sh
+core/.venv/bin/python -m core.tools.eval_harness run
 ```
 
 `dev.sh` starts or verifies:

@@ -103,12 +103,15 @@ class MemoryManager:
 
     async def health(self) -> Dict[str, Any]:
         counts = {"item_count": 0, "embedded_count": 0}
+        migration_health = self.store.migration_health()
         if self.health_state != MemoryHealthState.OFFLINE:
             try:
                 counts = self.store.counts()
             except Exception as exc:
                 self.health_state = MemoryHealthState.DEGRADED
                 self.degraded_reason = str(exc)
+        if migration_health.get("migration_status") in {"failed", "unsupported"}:
+            self.degraded_reason = migration_health.get("migration_error") or self.degraded_reason
         return {
             "backend": self.backend,
             "requested_backend": self.requested_backend,
@@ -119,6 +122,7 @@ class MemoryManager:
             "degraded_reason": self.degraded_reason,
             "embedding_model": self.embedding_model,
             "embedding_available": self.embedding_available,
+            **migration_health,
         }
 
     async def persist_episodic_trace(
