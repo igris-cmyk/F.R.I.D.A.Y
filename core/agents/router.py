@@ -143,6 +143,12 @@ def is_research_request(cmd: str) -> bool:
         "analyze repository architecture",
         "explain memory subsystem",
         "show approval workflow",
+        "where is planner implemented?",
+        "where is planner implemented",
+        "which files handle nats streaming?",
+        "which files handle nats streaming",
+        "which files define capabilities?",
+        "which files define capabilities",
     ]
     return normalized in research_phrases
 

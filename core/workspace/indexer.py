@@ -20,6 +20,12 @@ MAX_INDEX_FILE_BYTES = 1024 * 1024
 QUERY_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
 DOMAIN_PRIORITIES = {
+    "architecture": [
+        "core/main.py",
+        "core/agents/planner.py",
+        "core/capabilities/executor.py",
+        "core/security/permissions.py",
+    ],
     "planner": [
         "core/agents/planner.py",
         "core/agents/router.py",
@@ -40,8 +46,13 @@ DOMAIN_PRIORITIES = {
         "core/capabilities/registry.py",
         "core/capabilities/contracts.py",
     ],
-    "nats": ["core/main.py", "apps/desktop/src/main.js", "core/schemas/events.py"],
-    "stream": ["core/main.py", "apps/desktop/src/main.js", "core/schemas/events.py"],
+    "capabilities": [
+        "core/capabilities/registry.py",
+        "core/capabilities/executor.py",
+        "core/agents/planner.py",
+    ],
+    "nats": ["core/main.py", "apps/desktop/src/main.js", "infra/nats.conf", "core/schemas/events.py"],
+    "stream": ["core/main.py", "apps/desktop/src/main.js", "infra/nats.conf", "core/schemas/events.py"],
     "research": ["core/research/ranker.py", "core/research/context_builder.py", "core/agents/research.py"],
 }
 
@@ -128,7 +139,7 @@ class WorkspaceIndexer:
                     yield path
 
     def _is_excluded_directory(self, path: Path) -> bool:
-        return path.name in EXCLUDED_DIRS or self._is_outside_workspace(path)
+        return path.name in EXCLUDED_DIRS or path.name.startswith("nats-server-") or self._is_outside_workspace(path)
 
     def _should_index_file(self, path: Path) -> bool:
         if self._is_outside_workspace(path):

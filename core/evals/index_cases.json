@@ -1,0 +1,93 @@
+[
+  {
+    "id": "indexed_research_memory_subsystem",
+    "prompt": "explain memory subsystem",
+    "expected": {
+      "route": "RESEARCH",
+      "planner_source": "deterministic",
+      "fallback_used": false,
+      "selected_files_any": [
+        "core/memory/manager.py",
+        "core/memory/pipeline.py",
+        "core/memory/retriever.py",
+        "core/agents/memory_agent.py"
+      ],
+      "must_contain": ["Grounded"],
+      "status": "SUCCESS"
+    }
+  },
+  {
+    "id": "indexed_research_architecture",
+    "prompt": "analyze repository architecture",
+    "expected": {
+      "route": "RESEARCH",
+      "planner_source": "deterministic",
+      "fallback_used": false,
+      "selected_files_any": [
+        "core/main.py",
+        "core/agents/planner.py",
+        "core/capabilities/executor.py",
+        "core/security/permissions.py"
+      ],
+      "must_contain": ["Grounded"],
+      "status": "SUCCESS"
+    }
+  },
+  {
+    "id": "indexed_research_security_policy",
+    "prompt": "show approval workflow",
+    "expected": {
+      "route": ["TERMINAL", "RESEARCH"],
+      "planner_source": "deterministic",
+      "fallback_used": false,
+      "selected_files_any": [
+        "core/security/approval.py",
+        "core/security/permissions.py",
+        "core/main.py",
+        "core/schemas/events.py"
+      ],
+      "status": "SUCCESS"
+    }
+  },
+  {
+    "id": "indexed_search_planner",
+    "prompt": "where is planner implemented?",
+    "expected": {
+      "route": "RESEARCH",
+      "planner_source": "deterministic",
+      "fallback_used": false,
+      "selected_files_any": ["core/agents/planner.py"],
+      "status": "SUCCESS"
+    }
+  },
+  {
+    "id": "indexed_search_nats",
+    "prompt": "which files handle NATS streaming?",
+    "expected": {
+      "route": "RESEARCH",
+      "planner_source": "deterministic",
+      "fallback_used": false,
+      "selected_files_any": [
+        "core/main.py",
+        "apps/desktop/src/main.js",
+        "infra/nats.conf"
+      ],
+      "status": "SUCCESS"
+    }
+  },
+  {
+    "id": "indexed_search_capabilities",
+    "prompt": "which files define capabilities?",
+    "expected": {
+      "route": "RESEARCH",
+      "planner_source": "deterministic",
+      "fallback_used": false,
+      "selected_files_any": [
+        "core/capabilities/registry.py",
+        "core/capabilities/executor.py",
+        "core/agents/planner.py"
+      ],
+      "status": "SUCCESS"
+    }
+  }
+]

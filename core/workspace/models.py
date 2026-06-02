@@ -23,6 +23,7 @@ EXCLUDED_DIRS = {
 }
 
 INDEXABLE_EXTENSIONS = {
+    ".conf",
     ".css",
     ".html",
     ".js",

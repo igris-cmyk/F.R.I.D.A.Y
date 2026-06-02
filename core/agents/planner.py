@@ -472,4 +472,26 @@ class CognitivePlanner:
                 requires_confirmation=False,
             )
 
+        if (
+            "planner implemented" in normalized_intent
+            or "nats streaming" in normalized_intent
+            or "define capabilities" in normalized_intent
+        ):
+            return Plan(
+                steps=[
+                    PlanStep(
+                        capability_id="filesystem.search",
+                        reason="Locate indexed project files for research.",
+                        input={"pattern": "*", "root": "."},
+                    ),
+                    PlanStep(
+                        capability_id="research.synthesize",
+                        reason="Synthesize the requested workspace intelligence.",
+                        input={"topic": intent.strip(), "goal": intent},
+                    ),
+                ],
+                estimated_risk="LOW",
+                requires_confirmation=False,
+            )
+
         return None

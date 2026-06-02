@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from core.research.context_builder import (
     ContextBudget,
@@ -7,6 +9,14 @@ from core.research.context_builder import (
     select_ranked_files,
 )
 from core.research.ranker import rank_research_files
+from core.research.workspace_boost import WorkspaceIndexBoost
+from core.workspace.indexer import WorkspaceIndexer
+
+
+def _write(root: Path, relative_path: str, content: str) -> None:
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 class TestResearchRanking(unittest.TestCase):
@@ -116,11 +126,87 @@ class TestResearchRanking(unittest.TestCase):
             "core/.venv/lib/site.py",
             "node_modules/pkg/index.js",
             "core/agents/planner.py",
+            ".env",
         ]
         first = rank_research_files("repository architecture", candidates)
         second = rank_research_files("repository architecture", candidates)
         self.assertEqual(first, second)
-        self.assertFalse(any(".venv" in item.path or "node_modules" in item.path for item in first))
+        self.assertFalse(any(".venv" in item.path or "node_modules" in item.path or item.path == ".env" for item in first))
+
+    def test_workspace_index_boost_missing_index_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ranked = rank_research_files(
+                "explain memory subsystem",
+                ["core/main.py", "core/memory/manager.py"],
+                workspace_root=tmp,
+            )
+
+        self.assertEqual(ranked[0].path, "core/memory/manager.py")
+
+    def test_workspace_index_boost_prioritizes_indexed_planner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "core/agents/planner.py", "class CognitivePlanner:\n    pass\n")
+            _write(root, "core/main.py", "planner = 'fallback'\n")
+            WorkspaceIndexer(root).build()
+
+            ranked = rank_research_files("where is planner implemented?", ["core/main.py"], workspace_root=str(root))
+
+        self.assertEqual(ranked[0].path, "core/agents/planner.py")
+        self.assertTrue(any("workspace_index_boost" in reason for reason in ranked[0].reasons))
+
+    def test_workspace_index_boost_prioritizes_security_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "core/security/permissions.py", "class SecurityPolicy:\n    pass\n")
+            _write(root, "core/main.py", "from core.security.permissions import SecurityPolicy\n")
+            WorkspaceIndexer(root).build()
+
+            ranked = rank_research_files("security policy", ["core/main.py"], workspace_root=str(root))
+
+        self.assertEqual(ranked[0].path, "core/security/permissions.py")
+
+    def test_workspace_index_boost_finds_nats_streaming_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "core/main.py", "subject = f'friday.stream.{trace_id}'\n")
+            _write(root, "apps/desktop/src/main.js", "nc.subscribe(`friday.stream.${traceId}`)\n")
+            _write(root, "infra/nats.conf", "websocket {\n  port: 9222\n}\n")
+            WorkspaceIndexer(root).build()
+
+            ranked = rank_research_files("which files handle NATS streaming?", [], workspace_root=str(root))
+
+        paths = [item.path for item in ranked[:3]]
+        self.assertIn("core/main.py", paths)
+        self.assertIn("apps/desktop/src/main.js", paths)
+
+    def test_workspace_boost_adapter_handles_missing_and_corrupt_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing = WorkspaceIndexBoost(root)
+            self.assertFalse(missing.available())
+            self.assertEqual(missing.boost_map("planner"), {})
+
+            corrupt_db = root / ".friday/workspace/workspace_index.sqlite3"
+            corrupt_db.parent.mkdir(parents=True, exist_ok=True)
+            corrupt_db.write_text("not sqlite", encoding="utf-8")
+            corrupt = WorkspaceIndexBoost(root)
+
+            self.assertFalse(corrupt.available())
+            self.assertEqual(corrupt.boost_map("planner"), {})
+
+    def test_workspace_boost_adapter_returns_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "core/agents/planner.py", "class CognitivePlanner:\n    pass\n")
+            WorkspaceIndexer(root).build()
+
+            boosts = WorkspaceIndexBoost(root).boost_map("planner")
+
+        self.assertIn("core/agents/planner.py", boosts)
+        self.assertGreater(boosts["core/agents/planner.py"].score, 0)
+        self.assertIn("planner", boosts["core/agents/planner.py"].role_tags)
+        self.assertIn("CognitivePlanner", boosts["core/agents/planner.py"].symbols)
 
 
 class TestBoundedContextBuilder(unittest.TestCase):

@@ -51,6 +51,12 @@ class TestEvalHarness(unittest.TestCase):
         self.assertGreaterEqual(len(cases), 1)
         self.assertTrue(any(case["id"] == "prompt_injection_delete_blocked" for case in cases))
 
+    def test_index_suite_cases_load(self):
+        cases = load_suite_cases("index")
+
+        self.assertGreaterEqual(len(cases), 1)
+        self.assertTrue(any(case["id"] == "indexed_search_planner" for case in cases))
+
     def test_not_contains_assertion_fails_on_forbidden_text(self):
         result = EvalTraceResult(eval_id="escape", prompt="read key", output="OPENSSH PRIVATE KEY", status="FAILURE")
 

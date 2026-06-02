@@ -51,6 +51,7 @@ from core.research.context_builder import (
     select_ranked_files,
 )
 from core.research.ranker import rank_research_files
+from core.research.workspace_boost import WorkspaceIndexBoost
 
 # Global Capability Engine
 registry = CapabilityRegistry()
@@ -185,9 +186,48 @@ async def read_selected_files_for_workflow(
     capability_context: CapabilityExecutionContext,
     record: Optional[TraceRecord] = None,
 ) -> List[Dict[str, Any]]:
+    workspace_boost = WorkspaceIndexBoost(capability_context.workspace_root)
+    workspace_boosts = workspace_boost.boost_map(workflow_context["original_intent"], limit=20)
+    boost_diagnostics = workspace_boost.last_diagnostics
+    if boost_diagnostics.available:
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.research",
+            stage="planning",
+            message="[RESEARCH] Workspace index boost available.",
+        )
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.research",
+            stage="planning",
+            message=f"[RESEARCH] Workspace index boost applied to {boost_diagnostics.applied_count} files.",
+        )
+        if boost_diagnostics.top_path:
+            await publish_execution_update(
+                nc,
+                trace_id=trace_id,
+                source_component="core.research",
+                stage="planning",
+                message=(
+                    f"[RESEARCH] Top index match: "
+                    f"{boost_diagnostics.top_path} score={boost_diagnostics.top_score}"
+                ),
+            )
+    else:
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.research",
+            stage="planning",
+            message="[RESEARCH] Workspace index unavailable; using path-based ranking.",
+        )
+
     ranked_files = rank_research_files(
         workflow_context["original_intent"],
         workflow_context["files_found"],
+        workspace_boosts=workspace_boosts,
     )
     selected_files = select_ranked_files(ranked_files, budget=ContextBudget())
     workflow_context["metadata"]["ranked_files"] = [
@@ -195,6 +235,14 @@ async def read_selected_files_for_workflow(
         for item in ranked_files
     ]
     workflow_context["metadata"]["selected_files"] = selected_files
+    workflow_context["metadata"]["workspace_index_boost"] = {
+        "available": boost_diagnostics.available,
+        "applied_count": boost_diagnostics.applied_count,
+        "top_path": boost_diagnostics.top_path,
+        "top_score": boost_diagnostics.top_score,
+        "reason": boost_diagnostics.reason,
+        "stale": boost_diagnostics.stale,
+    }
 
     if not selected_files:
         return []

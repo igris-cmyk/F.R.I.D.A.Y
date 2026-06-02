@@ -1,4 +1,4 @@
-.PHONY: dev stop health eval eval-json eval-security eval-all test index index-status index-search
+.PHONY: dev stop health eval eval-json eval-security eval-index eval-all test index index-status index-search
 
 dev:
 	./scripts/dev.sh
@@ -17,6 +17,9 @@ eval-json:
 
 eval-security:
 	core/.venv/bin/python -m core.tools.eval_harness run --suite security
+
+eval-index:
+	core/.venv/bin/python -m core.tools.eval_harness run --suite index
 
 eval-all:
 	core/.venv/bin/python -m core.tools.eval_harness run --suite all

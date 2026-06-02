@@ -7,6 +7,7 @@ from core.workspace.models import ImportRecord, SymbolRecord, TextMatchRecord, W
 
 LANGUAGE_BY_EXTENSION = {
     ".css": "css",
+    ".conf": "config",
     ".html": "html",
     ".js": "javascript",
     ".json": "json",
@@ -215,9 +216,9 @@ def infer_role_tags(
         tags.add("capability")
     if lowered_path.startswith("core/research/") or "research" in lowered_path:
         tags.add("research")
-    if nats_subjects or "nats" in lowered_content:
+    if nats_subjects or "nats" in lowered_content or "nats" in lowered_path:
         tags.add("nats")
-    if "friday.stream" in lowered_content:
+    if "friday.stream" in lowered_content or ("nats" in lowered_path and "websocket" in lowered_content):
         tags.add("nats_streaming")
     if lowered_path.startswith("tests/") or PurePosixPath(lowered_path).name.startswith("test_"):
         tags.add("test")
@@ -229,7 +230,7 @@ def infer_role_tags(
         tags.add("docs")
     if lowered_path.startswith("apps/desktop/"):
         tags.add("frontend")
-    if lowered_path.endswith(("pyproject.toml", "package.json", "tauri.conf.json")):
+    if lowered_path.endswith(("pyproject.toml", "package.json", "tauri.conf.json", ".conf")):
         tags.add("config")
     if lowered_path.startswith("core/evals/") or "eval_harness" in lowered_path:
         tags.add("eval")

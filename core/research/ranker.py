@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 import re
+from typing import Mapping
+
+from core.research.workspace_boost import WorkspaceBoost, WorkspaceIndexBoost
 
 
 EXCLUDED_DIRS = {
     ".git",
+    ".friday",
     ".venv",
     "__pycache__",
     "node_modules",
@@ -14,7 +18,24 @@ EXCLUDED_DIRS = {
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    ".next",
+    ".turbo",
+    "coverage",
 }
+
+SECRET_FILENAMES = {
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.production",
+    ".env.test",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+
+SECRET_EXTENSIONS = {".key", ".pem", ".p12", ".pfx"}
 
 SOURCE_EXTENSIONS = {
     ".py",
@@ -22,6 +43,7 @@ SOURCE_EXTENSIONS = {
     ".ts",
     ".rs",
     ".json",
+    ".conf",
     ".toml",
     ".yml",
     ".yaml",
@@ -131,8 +153,16 @@ class RankedFile:
 
 
 def is_excluded_path(path: str) -> bool:
-    parts = path.replace("\\", "/").split("/")
-    return any(part in EXCLUDED_DIRS for part in parts)
+    normalized = path.replace("\\", "/").strip()
+    pure_path = PurePosixPath(normalized)
+    parts = pure_path.parts
+    if pure_path.is_absolute() or ".." in parts:
+        return True
+    if any(part in EXCLUDED_DIRS for part in parts):
+        return True
+    if pure_path.name in SECRET_FILENAMES or pure_path.suffix.lower() in SECRET_EXTENSIONS:
+        return True
+    return False
 
 
 def extract_keywords(intent: str) -> set[str]:
@@ -168,15 +198,24 @@ def _path_terms(path: str) -> set[str]:
     }
 
 
-def rank_research_files(intent: str, candidate_files: list[str]) -> list[RankedFile]:
+def rank_research_files(
+    intent: str,
+    candidate_files: list[str],
+    workspace_root: str | None = None,
+    workspace_boosts: Mapping[str, WorkspaceBoost] | None = None,
+) -> list[RankedFile]:
     keywords = extract_keywords(intent)
     active_profiles = _active_profiles(intent, keywords)
     query_mentions_tests = any(word in keywords for word in {"test", "tests", "testing"})
     query_mentions_docs = any(word in keywords for word in {"doc", "docs", "readme", "overview"})
     query_mentions_verification = any(word in keywords for word in {"verify", "verification", "smoke"})
+    boosts = dict(workspace_boosts or {})
+    if workspace_root and workspace_boosts is None:
+        boosts = WorkspaceIndexBoost(workspace_root).boost_map(intent)
 
     ranked: list[RankedFile] = []
-    for raw_path in dict.fromkeys(candidate_files):
+    candidates = list(dict.fromkeys([*candidate_files, *boosts.keys()]))
+    for raw_path in candidates:
         path = raw_path.replace("\\", "/").strip()
         if not path or is_excluded_path(path):
             continue
@@ -222,7 +261,13 @@ def rank_research_files(intent: str, candidate_files: list[str]) -> list[RankedF
             score -= 10.0
             reasons.append("penalty:readme")
 
+        boost = boosts.get(path)
+        if boost:
+            score += boost.score
+            reasons.extend(boost.reasons)
+            reasons.append(f"workspace_index_boost:{boost.score}")
+
         if score > 0:
-            ranked.append(RankedFile(path=path, score=round(score, 3), reasons=reasons))
+            ranked.append(RankedFile(path=path, score=round(score, 3), reasons=list(dict.fromkeys(reasons))))
 
     return sorted(ranked, key=lambda item: (-item.score, item.path))

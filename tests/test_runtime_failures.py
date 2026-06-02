@@ -381,6 +381,57 @@ class TestRuntimeFailures(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[RESEARCH] Selected 4 files for grounded synthesis.", messages)
             self.assertTrue(any(message.startswith("[RESEARCH] Context budget: 400/12000 chars") for message in messages))
 
+    async def test_research_workspace_boost_telemetry_when_index_available(self):
+        from core.workspace.indexer import WorkspaceIndexer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            for path in (
+                "core/main.py",
+                "core/agents/planner.py",
+                "core/capabilities/executor.py",
+                "core/security/permissions.py",
+            ):
+                target = workspace / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("x" * 100, encoding="utf-8")
+            WorkspaceIndexer(workspace).build()
+
+            nc = FakeNATS()
+            workflow_context = create_workflow_context("trace-index-telemetry", "analyze repository architecture")
+            capture_workflow_result(
+                workflow_context,
+                "filesystem.search",
+                {
+                    "files": [
+                        "core/main.py",
+                        "core/agents/planner.py",
+                        "core/capabilities/executor.py",
+                        "core/security/permissions.py",
+                    ],
+                    "count": 4,
+                },
+            )
+
+            await read_selected_files_for_workflow(
+                nc=nc,
+                trace_id="trace-index-telemetry",
+                executor=CapabilityExecutor(CapabilityRegistry(), SecurityPolicy()),
+                workflow_context=workflow_context,
+                capability_context=CapabilityExecutionContext(
+                    trace_id="trace-index-telemetry",
+                    source_intent="analyze repository architecture",
+                    workspace_root=str(workspace),
+                ),
+                record=FakeRecord(),
+            )
+
+            events = [json.loads(payload.decode()) for _, payload in nc.published]
+            messages = [event["payload"]["message"] for event in events]
+            self.assertIn("[RESEARCH] Workspace index boost available.", messages)
+            self.assertTrue(any(message.startswith("[RESEARCH] Workspace index boost applied to ") for message in messages))
+            self.assertTrue(any(message.startswith("[RESEARCH] Top index match: ") for message in messages))
+
     async def test_research_synthesize_receives_prior_file_contents(self):
         workflow_context = create_workflow_context("trace-synth", "analyze repository architecture")
         capture_workflow_result(

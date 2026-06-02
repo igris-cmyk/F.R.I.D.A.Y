@@ -15,6 +15,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CASES_PATH = PROJECT_ROOT / "core" / "evals" / "cases.json"
 DEFAULT_SECURITY_CASES_PATH = PROJECT_ROOT / "core" / "evals" / "security_cases.json"
+DEFAULT_INDEX_CASES_PATH = PROJECT_ROOT / "core" / "evals" / "index_cases.json"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / ".friday" / "evals"
 DEFAULT_EVAL_DB_PATH = DEFAULT_REPORT_DIR / "eval_memory.sqlite3"
 GLOBAL_MAX_LATENCY_MS = 30000
@@ -94,6 +95,8 @@ def load_suite_cases(suite: str, cases_path: Path | None = None) -> list[dict[st
         return load_cases(DEFAULT_CASES_PATH)
     if suite == "security":
         return load_cases(DEFAULT_SECURITY_CASES_PATH)
+    if suite == "index":
+        return load_cases(DEFAULT_INDEX_CASES_PATH)
     if suite == "all":
         return load_cases(DEFAULT_CASES_PATH) + load_cases(DEFAULT_SECURITY_CASES_PATH)
     raise ValueError(f"Unknown eval suite: {suite}")
@@ -370,6 +373,10 @@ async def run_eval_suite(
 ) -> dict[str, Any]:
     configure_eval_environment(memory_db_path)
     reset_eval_memory_db(memory_db_path)
+    if suite_name == "index":
+        from core.workspace.indexer import WorkspaceIndexer
+
+        WorkspaceIndexer(workspace_root).build()
     memory_manager = await initialize_eval_memory(memory_db_path)
     from core.agents.memory_agent import memory_agent
     from core.memory import pipeline as memory_pipeline
@@ -564,7 +571,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run F.R.I.D.A.Y core runtime evals.")
     subparsers = parser.add_subparsers(dest="command")
     run_parser = subparsers.add_parser("run", help="Run the eval suite.")
-    run_parser.add_argument("--suite", choices=["core", "security", "all"], default="core")
+    run_parser.add_argument("--suite", choices=["core", "security", "index", "all"], default="core")
     run_parser.add_argument("--cases", default=None)
     run_parser.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
     run_parser.add_argument("--memory-db", default=str(DEFAULT_EVAL_DB_PATH))
