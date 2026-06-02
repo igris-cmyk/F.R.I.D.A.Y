@@ -17,6 +17,7 @@ from core.config import (
     OLLAMA_BASE_URL,
 )
 from core.memory.manager import memory_manager
+from core.memory.redaction import redact_text
 from core.security.permissions import SecurityPolicy, RiskLevel
 
 class CapabilityExecutor:
@@ -39,6 +40,13 @@ class CapabilityExecutor:
     SYNTHESIS_MAX_CHARS_PER_FILE = 4000
     SYNTHESIS_MAX_TOTAL_CHARS = 20000
     SYNTHESIS_LLM_TIMEOUT_SECONDS = FRIDAY_RESEARCH_TIMEOUT_SECONDS
+    SENSITIVE_READ_FILENAMES = {
+        ".env",
+        ".env.local",
+        ".env.development",
+        ".env.production",
+        ".env.test",
+    }
     
     def __init__(self, registry: CapabilityRegistry, security_policy: SecurityPolicy):
         self.registry = registry
@@ -103,6 +111,17 @@ class CapabilityExecutor:
                     capability_id=invocation.capability_id,
                     error_code="INVALID_SCHEMA",
                     message=f"Missing required field: '{field}' in payload.",
+                    trace_id=invocation.context.trace_id
+                )
+
+        allowed_fields = set(definition.input_schema.get("properties", {}).keys())
+        if allowed_fields:
+            extra_fields = sorted(set(invocation.input_payload.keys()) - allowed_fields)
+            if extra_fields:
+                return CapabilityFailure(
+                    capability_id=invocation.capability_id,
+                    error_code="INVALID_SCHEMA",
+                    message=f"Unexpected input field(s): {', '.join(extra_fields)}.",
                     trace_id=invocation.context.trace_id
                 )
 
@@ -201,6 +220,9 @@ class CapabilityExecutor:
                 
             if not target_path.exists() or not target_path.is_file():
                 raise FileNotFoundError(f"File not found: {path_str}")
+
+            if target_path.name in self.SENSITIVE_READ_FILENAMES:
+                raise PermissionError("Access denied: sensitive environment files cannot be read.")
                 
             file_size = target_path.stat().st_size
             if file_size > 1024 * 1024: # 1MB limit
@@ -208,7 +230,14 @@ class CapabilityExecutor:
                 
             try:
                 content = target_path.read_text(encoding="utf-8")
-                return {"path": str(target_path.relative_to(workspace_root)), "content": content, "size": file_size, "truncated": False}
+                redacted_content = redact_text(content, max_chars=max(len(content), 4000))
+                return {
+                    "path": str(target_path.relative_to(workspace_root)),
+                    "content": redacted_content,
+                    "size": file_size,
+                    "truncated": False,
+                    "redacted": redacted_content != content,
+                }
             except UnicodeDecodeError:
                 raise ValueError("Binary files are not supported.")
                 

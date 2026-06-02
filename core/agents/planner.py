@@ -288,6 +288,14 @@ class CognitivePlanner:
                         f"missing_required_input: Capability '{step.capability_id}' missing required input '{field}' at step {index}."
                     )
 
+            allowed_fields = set(definition.input_schema.get("properties", {}).keys())
+            if allowed_fields:
+                extra_fields = sorted(set(step.input.keys()) - allowed_fields)
+                if extra_fields:
+                    errors.append(
+                        f"unexpected_input: Capability '{step.capability_id}' received unsupported input(s) {extra_fields} at step {index}."
+                    )
+
         return errors
 
     def _validation_fallback_reason(self, validation_errors: List[str]) -> str:
@@ -333,6 +341,15 @@ class CognitivePlanner:
             "remove",
             "wipe",
             "rm -rf",
+            "format",
+            "chmod",
+            "chown",
+            "trash",
+            "rename every file",
+            "move all files",
+            "bypass securitypolicy",
+            "pretend securitypolicy",
+            "shell.execute",
         ]
         if any(phrase in normalized_intent for phrase in destructive_phrases) or "rm" in tokens:
             return Plan(

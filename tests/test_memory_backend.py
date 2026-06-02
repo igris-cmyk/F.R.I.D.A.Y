@@ -642,6 +642,7 @@ class TestMemoryAgentBackend(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_candidates_matches_project_recall_retrieval(self):
         agent = MemoryAgent()
+        agent._reconstruct_narrative = AsyncMock(return_value="We inspected the memory subsystem files.")
         import core.agents.memory_agent as memory_agent_module
 
         old_manager = memory_agent_module.memory_manager

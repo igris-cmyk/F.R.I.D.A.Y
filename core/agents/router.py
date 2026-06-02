@@ -32,6 +32,15 @@ def is_operational_command(cmd: str) -> bool:
         "remove",
         "wipe",
         "rm -rf",
+        "format",
+        "chmod",
+        "chown",
+        "trash",
+        "rename every file",
+        "move all files",
+        "bypass securitypolicy",
+        "pretend securitypolicy",
+        "shell.execute",
     ]
 
     direct_prefixes = [

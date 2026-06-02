@@ -19,6 +19,8 @@ make dev
 make health
 make stop
 make eval
+make eval-security
+make eval-all
 ```
 
 Useful direct commands:
@@ -27,6 +29,8 @@ Useful direct commands:
 ./scripts/health.sh
 ./scripts/stop-dev.sh
 core/.venv/bin/python -m core.tools.eval_harness run
+core/.venv/bin/python -m core.tools.eval_harness run --suite security
+core/.venv/bin/python -m core.tools.eval_harness run --suite all
 ```
 
 `dev.sh` starts or verifies:
