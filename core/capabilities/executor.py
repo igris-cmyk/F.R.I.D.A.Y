@@ -12,6 +12,7 @@ from langchain_ollama import OllamaLLM
 from core.capabilities.contracts import CapabilityInvocation, CapabilityResult, CapabilityFailure, CapabilityRequiresApproval
 from core.capabilities.registry import CapabilityRegistry
 from core.config import (
+    ENABLE_LOCAL_LLM,
     FRIDAY_RESEARCH_MODEL,
     FRIDAY_RESEARCH_TIMEOUT_SECONDS,
     OLLAMA_BASE_URL,
@@ -25,6 +26,7 @@ class CapabilityExecutor:
 
     DEFAULT_SEARCH_EXCLUDED_DIRS = {
         ".git",
+        ".friday",
         ".venv",
         "__pycache__",
         "node_modules",
@@ -34,6 +36,10 @@ class CapabilityExecutor:
         ".pytest_cache",
         ".mypy_cache",
         ".ruff_cache",
+        ".next",
+        ".turbo",
+        "coverage",
+        "nats-server-v2.10.14-linux-amd64",
     }
     DEFAULT_SEARCH_MAX_RESULTS = 500
     SYNTHESIS_MAX_FILES = 8
@@ -290,7 +296,7 @@ class CapabilityExecutor:
         context = self._normalize_synthesis_context(invocation.input_payload.get("context", []))
         previous_results = invocation.input_payload.get("previous_results", [])
 
-        if context and self._ollama_model_available(FRIDAY_RESEARCH_MODEL):
+        if context and ENABLE_LOCAL_LLM and self._ollama_model_available(FRIDAY_RESEARCH_MODEL):
             try:
                 synthesis = await self._synthesize_with_llm(topic=topic, goal=goal, context=context)
                 return {
@@ -307,7 +313,12 @@ class CapabilityExecutor:
                 fallback["previous_result_count"] = len(previous_results)
                 return fallback
 
-        fallback_reason = "no_context" if not context else f"local_model_unavailable:{FRIDAY_RESEARCH_MODEL}"
+        if not context:
+            fallback_reason = "no_context"
+        elif not ENABLE_LOCAL_LLM:
+            fallback_reason = "local_model_disabled"
+        else:
+            fallback_reason = f"local_model_unavailable:{FRIDAY_RESEARCH_MODEL}"
         fallback = self._deterministic_grounded_summary(topic, context, reason=fallback_reason)
         fallback["previous_result_count"] = len(previous_results)
         return fallback
@@ -336,8 +347,18 @@ class CapabilityExecutor:
             normalized.append({
                 "path": path,
                 "content": bounded_content,
+                "content_preview": bounded_content,
                 "size": int(item.get("size", len(content))),
                 "truncated": bool(item.get("truncated", False)) or len(content) > len(bounded_content),
+                "context_type": item.get("context_type"),
+                "source": item.get("source"),
+                "summary": item.get("summary"),
+                "role_tags": item.get("role_tags", []),
+                "symbols": item.get("symbols", []),
+                "imports": item.get("imports", []),
+                "nats_subjects": item.get("nats_subjects", []),
+                "capabilities": item.get("capabilities", []),
+                "matched_terms": item.get("matched_terms", []),
             })
 
         return normalized
@@ -404,6 +425,10 @@ class CapabilityExecutor:
 
         for index, item in enumerate(context, start=1):
             lines.append(f"{index}. {item['path']}")
+            if item.get("source"):
+                lines.append(f"   - Context source: {item['source']}.")
+            if item.get("summary"):
+                lines.append(f"   - Indexed summary: {item['summary']}")
             lines.append(f"   - {self._describe_file(item['path'], item['content'])}")
             if item["truncated"]:
                 lines.append("   - Content was truncated to stay within the synthesis budget.")

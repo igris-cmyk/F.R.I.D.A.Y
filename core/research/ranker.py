@@ -128,6 +128,28 @@ DOMAIN_PROFILES = (
         "prefixes": ("apps/desktop/src/", "apps/desktop/src-tauri/src/"),
     },
     {
+        "name": "nats",
+        "triggers": {"nats", "websocket", "jetstream"},
+        "priorities": (
+            "core/main.py",
+            "apps/desktop/src/main.js",
+            "infra/nats.conf",
+            "core/schemas/events.py",
+        ),
+        "prefixes": ("infra/", "scripts/"),
+    },
+    {
+        "name": "capabilities",
+        "triggers": {"capabilities", "capability", "define capabilities"},
+        "priorities": (
+            "core/capabilities/registry.py",
+            "core/capabilities/executor.py",
+            "core/agents/planner.py",
+            "core/capabilities/contracts.py",
+        ),
+        "prefixes": ("core/capabilities/",),
+    },
+    {
         "name": "architecture",
         "triggers": {"architecture", "repository", "project structure", "system design", "overview"},
         "priorities": (

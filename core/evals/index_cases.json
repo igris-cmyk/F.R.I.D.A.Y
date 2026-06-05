@@ -13,7 +13,8 @@
         "core/agents/memory_agent.py"
       ],
       "must_contain": ["Grounded"],
-      "status": "SUCCESS"
+      "status": "SUCCESS",
+      "max_latency_ms": 3000
     }
   },
   {
@@ -30,7 +31,8 @@
         "core/security/permissions.py"
       ],
       "must_contain": ["Grounded"],
-      "status": "SUCCESS"
+      "status": "SUCCESS",
+      "max_latency_ms": 3000
     }
   },
   {
@@ -46,7 +48,8 @@
         "core/main.py",
         "core/schemas/events.py"
       ],
-      "status": "SUCCESS"
+      "status": "SUCCESS",
+      "max_latency_ms": 3000
     }
   },
   {
@@ -57,7 +60,8 @@
       "planner_source": "deterministic",
       "fallback_used": false,
       "selected_files_any": ["core/agents/planner.py"],
-      "status": "SUCCESS"
+      "status": "SUCCESS",
+      "max_latency_ms": 3000
     }
   },
   {
@@ -72,7 +76,8 @@
         "apps/desktop/src/main.js",
         "infra/nats.conf"
       ],
-      "status": "SUCCESS"
+      "status": "SUCCESS",
+      "max_latency_ms": 3000
     }
   },
   {
@@ -87,7 +92,8 @@
         "core/capabilities/executor.py",
         "core/agents/planner.py"
       ],
-      "status": "SUCCESS"
+      "status": "SUCCESS",
+      "max_latency_ms": 3000
     }
   }
 ]

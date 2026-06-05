@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.capabilities.registry import CapabilityRegistry
 from core.config import (
+    ENABLE_LOCAL_LLM,
     FRIDAY_PLANNER_MODEL,
     FRIDAY_PLANNER_TIMEOUT_SECONDS,
     OLLAMA_BASE_URL,
@@ -83,9 +84,11 @@ class CognitivePlanner:
         registry: Optional[CapabilityRegistry] = None,
         llm: Optional[OllamaLLM] = None,
         timeout_seconds: Optional[float] = None,
+        enable_local_llm: Optional[bool] = None,
     ):
         self.registry = registry or CapabilityRegistry()
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else FRIDAY_PLANNER_TIMEOUT_SECONDS
+        self.enable_local_llm = ENABLE_LOCAL_LLM if enable_local_llm is None else enable_local_llm
         self.model = FRIDAY_PLANNER_MODEL
         self.base_url = OLLAMA_BASE_URL
         self.llm = llm or OllamaLLM(
@@ -147,6 +150,11 @@ class CognitivePlanner:
         return self._finalize_plan(plan, source="deterministic", fallback_used=False)
 
     async def _generate_llm_plan(self, intent: str, context: Optional[str]) -> Plan:
+        if not self.enable_local_llm:
+            raise PlannerFallbackError(
+                "local_llm_disabled",
+                "Local LLM planning disabled by ENABLE_LOCAL_LLM=false.",
+            )
         await self._verify_ollama_ready()
         raw = await asyncio.wait_for(
             self._invoke_llm(intent=intent, context=context),
@@ -472,16 +480,48 @@ class CognitivePlanner:
                 requires_confirmation=False,
             )
 
-        if (
-            "planner implemented" in normalized_intent
-            or "nats streaming" in normalized_intent
-            or "define capabilities" in normalized_intent
-        ):
+        if "planner implemented" in normalized_intent:
             return Plan(
                 steps=[
                     PlanStep(
                         capability_id="filesystem.search",
-                        reason="Locate indexed project files for research.",
+                        reason="Locate planner implementation files for research.",
+                        input={"pattern": "*.py", "root": "core/agents"},
+                    ),
+                    PlanStep(
+                        capability_id="research.synthesize",
+                        reason="Synthesize the requested workspace intelligence.",
+                        input={"topic": intent.strip(), "goal": intent},
+                    ),
+                ],
+                estimated_risk="LOW",
+                requires_confirmation=False,
+            )
+
+        if "define capabilities" in normalized_intent:
+            return Plan(
+                steps=[
+                    PlanStep(
+                        capability_id="filesystem.search",
+                        reason="Locate capability definition files for research.",
+                        input={"pattern": "*.py", "root": "core"},
+                    ),
+                    PlanStep(
+                        capability_id="research.synthesize",
+                        reason="Synthesize the requested workspace intelligence.",
+                        input={"topic": intent.strip(), "goal": intent},
+                    ),
+                ],
+                estimated_risk="LOW",
+                requires_confirmation=False,
+            )
+
+        if "nats streaming" in normalized_intent:
+            return Plan(
+                steps=[
+                    PlanStep(
+                        capability_id="filesystem.search",
+                        reason="Locate NATS and streaming files for research.",
                         input={"pattern": "*", "root": "."},
                     ),
                     PlanStep(

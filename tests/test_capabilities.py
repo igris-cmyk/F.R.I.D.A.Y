@@ -21,7 +21,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         self.registry = CapabilityRegistry()
         self.security = SecurityPolicy()
         self.executor = CapabilityExecutor(self.registry, self.security)
-        self.planner = CognitivePlanner(registry=self.registry)
+        self.planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         self.planner._generate_llm_plan = AsyncMock(side_effect=asyncio.TimeoutError())
 
     def _reload_config_and_planner(self):
@@ -52,6 +52,9 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_FILES, 4)
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_CHARS_PER_FILE, 3500)
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_TOTAL_CHARS, 12000)
+            self.assertEqual(config_module.LLM_PROVIDER, "deepseek")
+            self.assertEqual(config_module.DEEPSEEK_MODEL, "deepseek-v4-flash")
+            self.assertFalse(config_module.ENABLE_LOCAL_LLM)
         self._reload_config()
 
     def test_default_planner_model_is_laptop_friendly(self):
@@ -87,7 +90,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         self._reload_config_and_planner()
 
     def test_planner_prompt_is_compact_for_local_models(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         self.assertLess(len(planner.prompt.template), 700)
         self.assertIn("Allowed capabilities:", planner.prompt.template)
         self.assertIn("Intent:\n{intent}", planner.prompt.template)
@@ -125,6 +128,10 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             "FRIDAY_RESEARCH_MAX_FILES": "3",
             "FRIDAY_RESEARCH_MAX_CHARS_PER_FILE": "1200",
             "FRIDAY_RESEARCH_MAX_TOTAL_CHARS": "3000",
+            "LLM_PROVIDER": "ollama",
+            "ENABLE_LOCAL_LLM": "true",
+            "DEEPSEEK_MODEL": "deepseek:test",
+            "OLLAMA_MODEL": "ollama:test",
         }
         with patch.dict(os.environ, env, clear=True):
             config_module = self._reload_config()
@@ -138,6 +145,10 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_FILES, 3)
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_CHARS_PER_FILE, 1200)
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_TOTAL_CHARS, 3000)
+            self.assertEqual(config_module.LLM_PROVIDER, "ollama")
+            self.assertTrue(config_module.ENABLE_LOCAL_LLM)
+            self.assertEqual(config_module.DEEPSEEK_MODEL, "deepseek:test")
+            self.assertEqual(config_module.OLLAMA_MODEL, "ollama:test")
         self._reload_config()
 
     def test_agent_llm_modules_do_not_hardcode_local_model_literals(self):
@@ -197,7 +208,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.planner._generate_llm_plan.assert_not_awaited()
 
     async def test_ambiguous_prompt_still_attempts_llm_planner(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         planner._generate_llm_plan = AsyncMock(side_effect=asyncio.TimeoutError())
 
         plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
@@ -445,7 +456,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         self.assertIn(res.error_code, {"SECURITY_DENIAL", "CAPABILITY_DISABLED"})
 
     async def test_planner_invalid_json_falls_back(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         planner._generate_llm_plan = AsyncMock(side_effect=ValueError("LLM returned invalid JSON"))
 
         plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
@@ -457,7 +468,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         planner._generate_llm_plan.assert_awaited_once()
 
     async def test_planner_unknown_capability_falls_back(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         planner._generate_llm_plan = AsyncMock(return_value=planner._parse_llm_output(
             '{"steps":[{"capability_id":"unknown.capability","reason":"bad","input":{}}],"estimated_risk":"LOW","requires_confirmation":false}'
         ))
@@ -471,7 +482,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         planner._generate_llm_plan.assert_awaited_once()
 
     async def test_planner_timeout_falls_back(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         planner._generate_llm_plan = AsyncMock(side_effect=asyncio.TimeoutError())
 
         plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
@@ -482,7 +493,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         planner._generate_llm_plan.assert_awaited_once()
 
     async def test_planner_missing_required_input_falls_back(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         planner._generate_llm_plan = AsyncMock(return_value=planner._parse_llm_output(
             '{"steps":[{"capability_id":"filesystem.search","reason":"bad","input":{}}],"estimated_risk":"SAFE","requires_confirmation":false}'
         ))
@@ -501,7 +512,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan.validation.errors)
 
     async def test_model_missing_falls_back_with_visible_reason(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         planner._fetch_ollama_tags = lambda: {
             "models": [{"name": "qwen2.5:other", "model": "qwen2.5:other"}]
         }
@@ -515,7 +526,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         self.assertIn(planner.model, plan.validation.errors[0])
 
     async def test_llm_plan_uses_configured_model_when_available(self):
-        planner = CognitivePlanner(registry=self.registry)
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=True)
         planner._fetch_ollama_tags = lambda: {
             "models": [{"name": planner.model, "model": planner.model}]
         }
@@ -530,6 +541,18 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(plan.validation.fallback_reason)
         self.assertEqual(plan.steps[0].capability_id, "git.status")
         planner._invoke_llm.assert_awaited_once()
+
+    async def test_local_llm_disabled_skips_ollama_planner_path(self):
+        planner = CognitivePlanner(registry=self.registry, enable_local_llm=False)
+        planner._fetch_ollama_tags = AsyncMock(side_effect=AssertionError("Ollama should not be checked"))
+        planner._invoke_llm = AsyncMock(side_effect=AssertionError("Ollama should not be invoked"))
+
+        plan = await planner.generate_plan("coordinate a nuanced multi step repository investigation")
+
+        self.assertEqual(plan.steps[0].capability_id, "system.monitor")
+        self.assertTrue(plan.validation.fallback_used)
+        self.assertEqual(plan.validation.fallback_reason, "local_llm_disabled")
+        planner._invoke_llm.assert_not_awaited()
 
     async def test_unknown_capability_rejection(self):
         inv = CapabilityInvocation(

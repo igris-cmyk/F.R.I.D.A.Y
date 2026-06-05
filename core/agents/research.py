@@ -6,14 +6,18 @@ from typing import AsyncGenerator, Dict, Any
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from core.agents.memory_agent import memory_agent, RetrievalPolicy
-from core.config import FRIDAY_RESEARCH_MODEL, OLLAMA_BASE_URL
+from core.config import ENABLE_LOCAL_LLM, FRIDAY_RESEARCH_MODEL, OLLAMA_BASE_URL
 
 logger = logging.getLogger("friday.agents.research")
 
-llm = OllamaLLM(
-    model=FRIDAY_RESEARCH_MODEL,
-    base_url=OLLAMA_BASE_URL,
-    temperature=0.4 # Slightly creative for synthesis, but still bounded
+llm = (
+    OllamaLLM(
+        model=FRIDAY_RESEARCH_MODEL,
+        base_url=OLLAMA_BASE_URL,
+        temperature=0.4 # Slightly creative for synthesis, but still bounded
+    )
+    if ENABLE_LOCAL_LLM
+    else None
 )
 
 async def execute_research(query: str, environment: Dict[str, Any] = None) -> AsyncGenerator[Dict[str, Any], None]:
@@ -63,9 +67,23 @@ async def execute_research(query: str, environment: Dict[str, Any] = None) -> As
         "Synthesis:"
     )
     
-    chain = prompt | llm
-    
     yield {"stage": "synthesizing", "message": "Generating structured synthesis...", "progress_percentage": 80}
+
+    if llm is None:
+        yield {
+            "stage": "completed",
+            "message": "Synthesis complete using deterministic local fallback.",
+            "progress_percentage": 100,
+            "final_result": (
+                "Local research LLM is disabled. "
+                f"Memory continuity: {cognitive_context}\nQuery: {query}"
+            ),
+            "success": True,
+            "latency_ms": 0,
+        }
+        return
+
+    chain = prompt | llm
     
     try:
         # In a fully streaming setup, we would use astream() here.

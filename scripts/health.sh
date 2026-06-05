@@ -17,6 +17,30 @@ required_models=(
   "nomic-embed-text"
 )
 
+llm_provider="${LLM_PROVIDER:-deepseek}"
+case "${llm_provider}" in
+  deepseek)
+    ok "LLM provider configured: deepseek"
+    if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+      ok "DeepSeek API key present"
+    else
+      warn "DeepSeek API key missing. Set DEEPSEEK_API_KEY for cloud reasoning."
+    fi
+    warn "DeepSeek not tested live by health check"
+    ;;
+  ollama)
+    ok "LLM provider configured: ollama"
+    if [[ "${ENABLE_LOCAL_LLM:-false}" == "true" || "${ENABLE_LOCAL_LLM:-false}" == "1" ]]; then
+      ok "Local LLM enabled"
+    else
+      warn "LLM_PROVIDER=ollama but ENABLE_LOCAL_LLM is not true"
+    fi
+    ;;
+  *)
+    warn "Unknown LLM provider configured: ${llm_provider}"
+    ;;
+esac
+
 tags_payload=""
 if tags_payload="$(fetch_url "${tags_url}" 2>/dev/null)"; then
   ok "Ollama reachable"

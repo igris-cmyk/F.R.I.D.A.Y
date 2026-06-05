@@ -30,6 +30,7 @@ from core.agents.router import intent_router
 from core.agents.memory_agent import RetrievalPolicy, memory_agent
 from core.memory.manager import memory_manager
 from core.memory.pipeline import process_completed_trace
+from core.llm import LLMRequest, model_router
 from core.supervision.heartbeat import HeartbeatMonitor, TraceRecord, SupervisionState
 from core.api.health import broadcast_health_telemetry
 from core.agents.planner import CognitivePlanner
@@ -50,6 +51,7 @@ from core.research.context_builder import (
     context_has_truncation,
     select_ranked_files,
 )
+from core.research.context_optimizer import ContextOptimizer
 from core.research.ranker import rank_research_files
 from core.research.workspace_boost import WorkspaceIndexBoost
 
@@ -155,13 +157,16 @@ def capture_workflow_result(
     if capability_id == "filesystem.read" and data.get("content") is not None:
         path = data.get("path")
         if path:
-            add_file_to_workflow_context(
-                workflow_context=workflow_context,
-                path=path,
-                content=data.get("content", ""),
-                size=data.get("size", 0),
-                truncated=data.get("truncated", False),
-            )
+            if data.get("context_type"):
+                add_optimized_context_record(workflow_context, data)
+            else:
+                add_file_to_workflow_context(
+                    workflow_context=workflow_context,
+                    path=path,
+                    content=data.get("content", ""),
+                    size=data.get("size", 0),
+                    truncated=data.get("truncated", False),
+                )
 
 
 def build_synthesis_payload(
@@ -176,6 +181,28 @@ def build_synthesis_payload(
         payload["context"] = workflow_context["files_read"]
     payload["previous_results"] = workflow_context["step_results"]
     return payload
+
+
+def add_optimized_context_record(
+    workflow_context: Dict[str, Any],
+    file_record: Dict[str, Any],
+) -> None:
+    path = file_record.get("path")
+    if not path:
+        return
+    existing_index = next(
+        (
+            index
+            for index, item in enumerate(workflow_context["files_read"])
+            if item.get("path") == path
+        ),
+        None,
+    )
+    if existing_index is not None:
+        workflow_context["files_read"][existing_index] = file_record
+    else:
+        workflow_context["files_read"].append(file_record)
+    workflow_context["synthesis_inputs"] = workflow_context["files_read"]
 
 
 async def read_selected_files_for_workflow(
@@ -229,12 +256,38 @@ async def read_selected_files_for_workflow(
         workflow_context["files_found"],
         workspace_boosts=workspace_boosts,
     )
-    selected_files = select_ranked_files(ranked_files, budget=ContextBudget())
+    index_records = {
+        path: record
+        for path, record in (
+            (path, workspace_boost.indexer.show(path))
+            for path in workspace_boosts.keys()
+        )
+        if record is not None
+    } if boost_diagnostics.available else {}
+    context_optimizer = ContextOptimizer(
+        intent=workflow_context["original_intent"],
+        workspace_root=capability_context.workspace_root,
+        workspace_boosts=workspace_boosts,
+    )
+    context_plan = context_optimizer.select(
+        ranked_files=ranked_files,
+        index_records=index_records,
+        existing_context=workflow_context["files_read"],
+    )
+    selected_files = context_plan.selected_paths
     workflow_context["metadata"]["ranked_files"] = [
         {"path": item.path, "score": item.score, "reasons": item.reasons}
         for item in ranked_files
     ]
     workflow_context["metadata"]["selected_files"] = selected_files
+    workflow_context["metadata"]["context_optimizer"] = {
+        "selected_records": len(context_plan.decisions),
+        "source_mix": context_plan.source_mix,
+        "avoided_duplicate_reads": context_plan.avoided_duplicate_reads,
+        "max_files": context_plan.budget.max_files,
+        "max_chars_per_file": context_plan.budget.max_chars_per_file,
+        "max_total_chars": context_plan.budget.max_total_chars,
+    }
     workflow_context["metadata"]["workspace_index_boost"] = {
         "available": boost_diagnostics.available,
         "applied_count": boost_diagnostics.applied_count,
@@ -270,9 +323,42 @@ async def read_selected_files_for_workflow(
         stage="planning",
         message=f"[RESEARCH] Selected {len(selected_files)} files for grounded synthesis.",
     )
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.research",
+        stage="planning",
+        message=f"[RESEARCH] Context optimizer selected {len(context_plan.decisions)} records.",
+    )
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.research",
+        stage="planning",
+        message=(
+            "[RESEARCH] Context source mix: "
+            f"file_read={context_plan.source_mix.get('file_read', 0)} "
+            f"index_summary={context_plan.source_mix.get('index_summary', 0)} "
+            f"cached={context_plan.source_mix.get('cached_preview', 0)}."
+        ),
+    )
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.research",
+        stage="planning",
+        message=f"[RESEARCH] Avoided duplicate reads: {context_plan.avoided_duplicate_reads}.",
+    )
 
     bound_reads = []
-    for path in selected_files:
+    for decision in context_plan.decisions:
+        if decision.source == "index_summary":
+            context_record = context_optimizer.build_index_context_record(decision)
+            add_optimized_context_record(workflow_context, context_record)
+            continue
+        if decision.source == "cached_preview":
+            continue
+
         await publish_execution_update(
             nc,
             trace_id=trace_id,
@@ -285,16 +371,17 @@ async def read_selected_files_for_workflow(
 
         invocation = CapabilityInvocation(
             capability_id="filesystem.read",
-            input_payload={"path": path},
+            input_payload={"path": decision.path},
             context=capability_context,
         )
         result = await executor.execute(invocation)
         if not getattr(result, "success", False):
-            logger.warning("Workflow-bound filesystem.read failed for %s: %s", path, getattr(result, "message", ""))
+            logger.warning("Workflow-bound filesystem.read failed for %s: %s", decision.path, getattr(result, "message", ""))
             continue
 
-        capture_workflow_result(workflow_context, "filesystem.read", result.data)
-        bound_reads.append(result.data)
+        optimized_record = context_optimizer.optimize_read_context(decision, result.data)
+        capture_workflow_result(workflow_context, "filesystem.read", optimized_record)
+        bound_reads.append(optimized_record)
         await publish_execution_update(
             nc,
             trace_id=trace_id,
@@ -312,7 +399,7 @@ async def read_selected_files_for_workflow(
         stage="planning",
         message=(
             f"[RESEARCH] Context budget: "
-            f"{budget_used}/{WORKFLOW_MAX_TOTAL_CONTEXT_CHARS} chars.{truncation_note}"
+            f"{budget_used}/{context_plan.budget.max_total_chars} chars.{truncation_note}"
         ),
     )
 
@@ -497,6 +584,52 @@ async def execute_memory_recall(
     return f"{recall_result['narrative']}\n\nSources: {sources}"
 
 
+async def execute_conversation(
+    nc: NATS,
+    trace_id: str,
+    message: str,
+    router=model_router,
+) -> str:
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.llm",
+        stage="executing",
+        message=f"[LLM] Using provider {router.settings.provider} model={router.settings.deepseek_model if router.settings.provider == 'deepseek' else router.settings.ollama_model}",
+        progress_percentage=70,
+    )
+    response = await router.generate(LLMRequest(
+        messages=[{"role": "user", "content": message}],
+        system_prompt=(
+            "You are F.R.I.D.A.Y. Answer conversational and explanatory prompts concisely. "
+            "Do not claim you executed tools. Tool execution is handled only by the local orchestrator."
+        ),
+        temperature=0.2,
+        max_tokens=700,
+        purpose="conversation",
+    ))
+    if response.success:
+        await publish_execution_update(
+            nc,
+            trace_id=trace_id,
+            source_component="core.llm",
+            stage="executing",
+            message="[LLM] Provider response received.",
+            progress_percentage=90,
+        )
+        return response.text
+
+    await publish_execution_update(
+        nc,
+        trace_id=trace_id,
+        source_component="core.llm",
+        stage="executing",
+        message=f"[LLM] Provider unavailable: {response.error_type or 'unknown'}.",
+        progress_percentage=90,
+    )
+    return response.text
+
+
 def log_memory_pipeline_task_result(task: asyncio.Task):
     try:
         result = task.result()
@@ -635,7 +768,11 @@ async def main():
                 output = await execute_memory_recall(nc, trace_id, query, environment)
                 success = True
             elif intent_type == "conversation":
-                output = f"[Conversational Response] Acknowledged: {final_state['parameters'].get('message')}"
+                output = await execute_conversation(
+                    nc,
+                    trace_id,
+                    final_state["parameters"].get("message") or intent.payload.raw_command,
+                )
                 success = True
             else:
                 # 4. Invoke Cognitive Planner

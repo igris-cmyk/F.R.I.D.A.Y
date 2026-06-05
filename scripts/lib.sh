@@ -21,6 +21,10 @@ info() {
   printf '[INFO] %s\n' "$*"
 }
 
+warn() {
+  printf '[WARN] %s\n' "$*"
+}
+
 fail() {
   printf '[ERROR] %s\n' "$*" >&2
 }

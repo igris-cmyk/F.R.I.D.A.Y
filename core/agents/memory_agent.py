@@ -6,7 +6,7 @@ from enum import Enum
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
 
-from core.config import FRIDAY_MEMORY_MODEL, FRIDAY_MEMORY_TIMEOUT_SECONDS, OLLAMA_BASE_URL
+from core.config import ENABLE_LOCAL_LLM, FRIDAY_MEMORY_MODEL, FRIDAY_MEMORY_TIMEOUT_SECONDS, OLLAMA_BASE_URL
 from core.memory.manager import MemoryHealthState, memory_manager
 
 logger = logging.getLogger("friday.agents.memory")
@@ -26,10 +26,14 @@ class MemoryAgent:
     """
     def __init__(self):
         # Strict low temperature for reconstruction to prevent hallucinatory amplification
-        self.reconstruction_llm = OllamaLLM(
-            model=FRIDAY_MEMORY_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            temperature=0.0,
+        self.reconstruction_llm = (
+            OllamaLLM(
+                model=FRIDAY_MEMORY_MODEL,
+                base_url=OLLAMA_BASE_URL,
+                temperature=0.0,
+            )
+            if ENABLE_LOCAL_LLM
+            else None
         )
 
     def policy_settings(self, policy: RetrievalPolicy) -> Dict[str, float | int]:
@@ -169,6 +173,9 @@ class MemoryAgent:
         Transforms episodic traces into a distilled continuity block.
         Prevents prompt flooding.
         """
+        if self.reconstruction_llm is None:
+            return self._deterministic_recall_summary(candidates, reason="local_llm_disabled")
+
         context_dump = "\n".join([
             (
                 f"- Title: {c.get('title') or c.get('intent')}\n"

@@ -33,6 +33,12 @@ core/.venv/bin/python -m core.tools.eval_harness run --suite security
 core/.venv/bin/python -m core.tools.eval_harness run --suite all
 ```
 
+LLM provider docs:
+
+```bash
+docs/llm-providers.md
+```
+
 `dev.sh` starts or verifies:
 
 - Ollama at `http://localhost:11434`
@@ -62,6 +68,7 @@ Run:
 ```
 
 The health check validates Ollama reachability, required models, NATS WebSocket port `9222`, the configured NATS TCP port, the Python venv, and the desktop package.
+It also reports the configured LLM provider and whether `DEEPSEEK_API_KEY` is present. It does not make a paid DeepSeek request.
 
 ## Stopping Dev Services
 

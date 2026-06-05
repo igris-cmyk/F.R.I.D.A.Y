@@ -5,7 +5,7 @@ from typing import Dict, Any, TypedDict
 from langgraph.graph import StateGraph, END
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
-from core.config import FRIDAY_ROUTER_MODEL, OLLAMA_BASE_URL
+from core.config import ENABLE_LOCAL_LLM, FRIDAY_ROUTER_MODEL, OLLAMA_BASE_URL
 
 logger = logging.getLogger("friday.agents.router")
 
@@ -192,6 +192,18 @@ async def classify_intent(state: RouterState) -> RouterState:
         return state
 
     # 2. Cognitive Classification Fallback (Bounded Local LLM Inference)
+    if not ENABLE_LOCAL_LLM:
+        logger.info("Cognitive classification skipped because ENABLE_LOCAL_LLM=false. Degrading to fallback conversation.")
+        state["intent"] = "conversation"
+        state["parameters"] = {"message": cmd}
+        state["routing_metadata"] = {
+            "source": "fallback",
+            "confidence": 0.1,
+            "latency_ms": int((time.time() - start_time)*1000),
+            "reason": "local_llm_disabled",
+        }
+        return state
+
     logger.info(f"Heuristics bypassed. Engaging cognitive intent classification for: '{cmd}'")
     
     env = state.get("environment") or {}

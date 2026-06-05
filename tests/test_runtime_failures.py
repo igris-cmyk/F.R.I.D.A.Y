@@ -379,7 +379,9 @@ class TestRuntimeFailures(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(message.startswith("[RESEARCH] Ranked 4 files") for message in messages))
             self.assertTrue(any(message.startswith("[RESEARCH] Top file: core/main.py") for message in messages))
             self.assertIn("[RESEARCH] Selected 4 files for grounded synthesis.", messages)
-            self.assertTrue(any(message.startswith("[RESEARCH] Context budget: 400/12000 chars") for message in messages))
+            self.assertIn("[RESEARCH] Context optimizer selected 4 records.", messages)
+            self.assertTrue(any(message.startswith("[RESEARCH] Context source mix: file_read=4") for message in messages))
+            self.assertTrue(any(message.startswith("[RESEARCH] Context budget: 400/10000 chars") for message in messages))
 
     async def test_research_workspace_boost_telemetry_when_index_available(self):
         from core.workspace.indexer import WorkspaceIndexer

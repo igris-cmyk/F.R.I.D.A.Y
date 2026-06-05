@@ -139,6 +139,7 @@ async def run_intent_for_eval(
         build_synthesis_payload,
         capture_workflow_result,
         create_workflow_context,
+        execute_conversation,
         execute_memory_recall,
         executor,
         planner,
@@ -172,7 +173,11 @@ async def run_intent_for_eval(
         result.actual_route = intent_type.upper()
 
         if intent_type == "conversation":
-            result.output = f"[Conversational Response] Acknowledged: {final_state['parameters'].get('message')}"
+            result.output = await execute_conversation(
+                nc,
+                trace_id,
+                final_state["parameters"].get("message") or command,
+            )
             result.status = "SUCCESS"
         elif intent_type == "memory":
             result.output = await execute_memory_recall(
