@@ -4,7 +4,24 @@ FRIDAY uses a local provider router for reasoning text. Tool execution remains l
 
 ## Default Provider
 
-DeepSeek is the default reasoning provider:
+OpenAI is the default cloud reasoning provider:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_api_key_here
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-5.4-mini
+OPENAI_TIMEOUT_SECONDS=30
+ENABLE_LOCAL_LLM=false
+```
+
+`OPENAI_API_KEY` must come from the environment or `.env`; never commit it. ChatGPT Plus does not include OpenAI API usage. API access requires a separate OpenAI API key and billing setup.
+
+If `OPENAI_API_KEY` is missing, FRIDAY returns a clean degraded message. It does not crash and does not fall back into unsafe tool execution.
+
+## DeepSeek Backup
+
+DeepSeek remains available as a selectable cloud reasoning provider:
 
 ```env
 LLM_PROVIDER=deepseek
@@ -47,7 +64,7 @@ Do not paste raw `.env` files or credentials into cloud reasoning prompts.
 
 ## Safety Boundary
 
-DeepSeek thinks; FRIDAY acts locally. DeepSeek responses cannot execute capabilities, approve actions, weaken policy, or bypass local security.
+OpenAI and DeepSeek think; FRIDAY acts locally. Cloud provider responses cannot execute capabilities, approve actions, weaken policy, or bypass local security.
 
 Known deterministic commands still skip provider reasoning:
 

@@ -595,7 +595,7 @@ async def execute_conversation(
         trace_id=trace_id,
         source_component="core.llm",
         stage="executing",
-        message=f"[LLM] Using provider {router.settings.provider} model={router.settings.deepseek_model if router.settings.provider == 'deepseek' else router.settings.ollama_model}",
+        message=f"[LLM] Using provider {router.settings.provider} model={router.selected_model()}",
         progress_percentage=70,
     )
     response = await router.generate(LLMRequest(

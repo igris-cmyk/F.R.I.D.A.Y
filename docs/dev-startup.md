@@ -68,7 +68,7 @@ Run:
 ```
 
 The health check validates Ollama reachability, required models, NATS WebSocket port `9222`, the configured NATS TCP port, the Python venv, and the desktop package.
-It also reports the configured LLM provider and whether `DEEPSEEK_API_KEY` is present. It does not make a paid DeepSeek request.
+It also reports the configured LLM provider and whether the matching cloud API key is present. It does not make a paid OpenAI or DeepSeek request.
 
 ## Stopping Dev Services
 

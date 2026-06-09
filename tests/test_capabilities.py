@@ -52,7 +52,8 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_FILES, 4)
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_CHARS_PER_FILE, 3500)
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_TOTAL_CHARS, 12000)
-            self.assertEqual(config_module.LLM_PROVIDER, "deepseek")
+            self.assertEqual(config_module.LLM_PROVIDER, "openai")
+            self.assertEqual(config_module.OPENAI_MODEL, "gpt-5.4-mini")
             self.assertEqual(config_module.DEEPSEEK_MODEL, "deepseek-v4-flash")
             self.assertFalse(config_module.ENABLE_LOCAL_LLM)
         self._reload_config()
@@ -130,6 +131,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             "FRIDAY_RESEARCH_MAX_TOTAL_CHARS": "3000",
             "LLM_PROVIDER": "ollama",
             "ENABLE_LOCAL_LLM": "true",
+            "OPENAI_MODEL": "openai:test",
             "DEEPSEEK_MODEL": "deepseek:test",
             "OLLAMA_MODEL": "ollama:test",
         }
@@ -147,6 +149,7 @@ class TestCapabilityFramework(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config_module.FRIDAY_RESEARCH_MAX_TOTAL_CHARS, 3000)
             self.assertEqual(config_module.LLM_PROVIDER, "ollama")
             self.assertTrue(config_module.ENABLE_LOCAL_LLM)
+            self.assertEqual(config_module.OPENAI_MODEL, "openai:test")
             self.assertEqual(config_module.DEEPSEEK_MODEL, "deepseek:test")
             self.assertEqual(config_module.OLLAMA_MODEL, "ollama:test")
         self._reload_config()

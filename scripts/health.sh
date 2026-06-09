@@ -17,8 +17,19 @@ required_models=(
   "nomic-embed-text"
 )
 
-llm_provider="${LLM_PROVIDER:-deepseek}"
+llm_provider="${LLM_PROVIDER:-openai}"
 case "${llm_provider}" in
+  openai)
+    ok "LLM provider configured: openai"
+    if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+      ok "OpenAI API key present"
+    else
+      missing "OPENAI_API_KEY"
+      printf 'Set OPENAI_API_KEY for OpenAI cloud reasoning.\n'
+      status=1
+    fi
+    info "OpenAI live health not tested by default"
+    ;;
   deepseek)
     ok "LLM provider configured: deepseek"
     if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
